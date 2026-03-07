@@ -76,6 +76,29 @@ claude mcp remove grok-search
 
 Replace the environment variables in the following command with your own values. The Grok endpoint must be OpenAI-compatible; Tavily is optional — `web_fetch` and `web_map` will be unavailable without it.
 
+#### GuDa Users (Recommended)
+
+GuDa users only need to set `GUDA_API_KEY` to access all services — API URLs are automatically derived:
+
+```bash
+claude mcp add-json grok-search --scope user '{
+  "type": "stdio",
+  "command": "uvx",
+  "args": [
+    "--from",
+    "git+https://github.com/GuDaStudio/GrokSearch@grok-with-tavily",
+    "grok-search"
+  ],
+  "env": {
+    "GUDA_API_KEY": "your-guda-api-key"
+  }
+}'
+```
+
+#### Custom Configuration
+
+To use your own API endpoints, configure each service separately:
+
 ```bash
 claude mcp add-json grok-search --scope user '{
   "type": "stdio",
@@ -98,18 +121,24 @@ You can also configure additional environment variables in the `env` field:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GROK_API_URL` | Yes | - | Grok API endpoint (OpenAI-compatible format) |
-| `GROK_API_KEY` | Yes | - | Grok API key |
-| `GROK_MODEL` | No | `grok-4-fast` | Default model (takes precedence over `~/.config/grok-search/config.json` when set) |
-| `TAVILY_API_KEY` | No | - | Tavily API key (for web_fetch / web_map) |
-| `TAVILY_API_URL` | No | `https://api.tavily.com` | Tavily API endpoint |
+| `GUDA_API_KEY` | No | - | GuDa API key (auto-derives all service URLs and keys when set) |
+| `GUDA_BASE_URL` | No | `https://code.guda.studio` | GuDa service base URL |
+| `GROK_API_URL` | No | `{GUDA_BASE_URL}/grok/v1` | Grok API endpoint (OpenAI-compatible), overrides GuDa-derived value |
+| `GROK_API_KEY` | No | `{GUDA_API_KEY}` | Grok API key, overrides GuDa-derived value |
+| `GROK_MODEL` | No | `grok-4.20-beta` | Default model (takes precedence over `~/.config/grok-search/config.json` when set) |
+| `TAVILY_API_KEY` | No | `{GUDA_API_KEY}` | Tavily API key (for web_fetch / web_map) |
+| `TAVILY_API_URL` | No | `{GUDA_BASE_URL}/tavily` | Tavily API endpoint |
 | `TAVILY_ENABLED` | No | `true` | Enable Tavily |
+| `FIRECRAWL_API_KEY` | No | `{GUDA_API_KEY}` | Firecrawl API key (fallback when Tavily fails) |
+| `FIRECRAWL_API_URL` | No | `{GUDA_BASE_URL}/firecrawl` | Firecrawl API endpoint |
 | `GROK_DEBUG` | No | `false` | Debug mode |
 | `GROK_LOG_LEVEL` | No | `INFO` | Log level |
 | `GROK_LOG_DIR` | No | `logs` | Log directory |
 | `GROK_RETRY_MAX_ATTEMPTS` | No | `3` | Max retry attempts |
 | `GROK_RETRY_MULTIPLIER` | No | `1` | Retry backoff multiplier |
 | `GROK_RETRY_MAX_WAIT` | No | `10` | Max retry wait in seconds |
+
+> **Note**: When `GUDA_API_KEY` is set, all `GROK_API_URL`/`GROK_API_KEY`/`TAVILY_*`/`FIRECRAWL_*` variables become optional as they are auto-derived from `GUDA_BASE_URL`. Explicitly set variables take higher priority.
 
 
 ### Verify Installation
@@ -216,7 +245,7 @@ A structured multi-phase planning scaffold to generate an executable search plan
 <summary>
 Q: Must I configure both Grok and Tavily?
 </summary>
-A: Grok (`GROK_API_URL` + `GROK_API_KEY`) is required and provides the core search capability. Tavily is optional — without it, `web_fetch` and `web_map` will return configuration error messages.
+A: Set `GUDA_API_KEY` to get full Grok + Tavily + Firecrawl service. Without GuDa, Grok (`GROK_API_URL` + `GROK_API_KEY`) is required and provides the core search capability. Tavily is optional — without it, `web_fetch` and `web_map` will return configuration error messages.
 </details>
 
 <details>
