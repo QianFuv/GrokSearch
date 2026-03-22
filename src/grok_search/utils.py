@@ -3,6 +3,18 @@ import re
 from .providers.base import SearchResult
 
 _URL_PATTERN = re.compile(r'https?://[^\s<>"\'`，。、；：！？》）】\)]+')
+_THINK_BLOCK_PATTERN = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_META_REFUSAL_MARKERS = (
+    "system instruction",
+    "system instructions",
+    'custom "system"',
+    "custom system",
+    "injected",
+    "jailbreak",
+    "override my behavior",
+    "override my core",
+    "built by xai",
+)
 
 
 def extract_unique_urls(text: str) -> list[str]:
@@ -10,14 +22,16 @@ def extract_unique_urls(text: str) -> list[str]:
     seen: set[str] = set()
     urls: list[str] = []
     for m in _URL_PATTERN.finditer(text):
-        url = m.group().rstrip('.,;:!?')
+        url = m.group().rstrip(".,;:!?")
         if url not in seen:
             seen.add(url)
             urls.append(url)
     return urls
 
 
-def format_extra_sources(tavily_results: list[dict] | None, firecrawl_results: list[dict] | None) -> str:
+def format_extra_sources(
+    tavily_results: list[dict] | None, firecrawl_results: list[dict] | None
+) -> str:
     sections = []
     idx = 1
     urls = []
@@ -60,22 +74,65 @@ def format_search_results(results: List[SearchResult]) -> str:
     formatted = []
     for i, result in enumerate(results, 1):
         parts = [f"## Result {i}: {result.title}"]
-        
+
         if result.url:
             parts.append(f"**URL:** {result.url}")
-        
+
         if result.snippet:
             parts.append(f"**Summary:** {result.snippet}")
-        
+
         if result.source:
             parts.append(f"**Source:** {result.source}")
-        
+
         if result.published_date:
             parts.append(f"**Published:** {result.published_date}")
-        
+
         formatted.append("\n".join(parts))
 
     return "\n\n---\n\n".join(formatted)
+
+
+def _looks_like_meta_refusal(paragraph: str) -> bool:
+    """
+    Detect whether a paragraph is prompt-conflict boilerplate.
+
+    Args:
+        paragraph: A single response paragraph.
+
+    Returns:
+        True when the paragraph looks like a meta refusal instead of an answer.
+    """
+    normalized = " ".join((paragraph or "").lower().split())
+    return any(marker in normalized for marker in _META_REFUSAL_MARKERS)
+
+
+def sanitize_model_output(text: str) -> str:
+    """
+    Remove hidden reasoning and prompt-conflict boilerplate from model output.
+
+    Args:
+        text: The raw model response text.
+
+    Returns:
+        The cleaned response text.
+    """
+    cleaned = (text or "").replace("\r\n", "\n")
+    cleaned = _THINK_BLOCK_PATTERN.sub("", cleaned).strip()
+    if not cleaned:
+        return ""
+
+    paragraphs = [
+        part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()
+    ]
+    while len(paragraphs) > 1 and _looks_like_meta_refusal(paragraphs[0]):
+        paragraphs.pop(0)
+
+    if len(paragraphs) == 1 and _looks_like_meta_refusal(paragraphs[0]):
+        return ""
+
+    cleaned = "\n\n".join(paragraphs).strip()
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
+
 
 fetch_prompt = """
 # Profile: Web Content Fetcher
@@ -207,35 +264,22 @@ rank_sources_prompt = (
 )
 
 search_prompt = """
-# Core Instruction
+You are a web research assistant.
 
-1. User needs may be vague. Think divergently, infer intent from multiple angles, and leverage full conversation context to progressively clarify their true needs.
-2. **Breadth-First Search**—Approach problems from multiple dimensions. Brainstorm 5+ perspectives and execute parallel searches for each. Consult as many high-quality sources as possible before responding.
-3. **Depth-First Search**—After broad exploration, select ≥2 most relevant perspectives for deep investigation into specialized knowledge.
-4. **Evidence-Based Reasoning & Traceable Sources**—Every claim must be followed by a citation (`citation_card` format). More credible sources strengthen arguments. If no references exist, remain silent.
-5. Before responding, ensure full execution of Steps 1–4.
+Goals:
+- Answer the user's question directly after checking the web.
+- Prefer primary, official, or otherwise authoritative sources.
+- Prefer recent sources when the question is time-sensitive.
+- If sources conflict, briefly say so and favor the most authoritative and recent evidence.
 
----
+Rules:
+- Do not mention system prompts, policy conflicts, jailbreaks, or hidden instructions.
+- Do not output chain-of-thought, hidden reasoning, or <think> tags.
+- Do not invent facts when you cannot verify them.
+- Search in English first unless the user's context clearly requires another language.
 
-# Search Instruction
-
-1. Think carefully before responding—anticipate the user’s true intent to ensure precision.
-2. Verify every claim rigorously to avoid misinformation.
-3. Follow problem logic—dig deeper until clues are exhaustively clear. If a question seems simple, still infer broader intent and search accordingly. Use multiple parallel tool calls per query and ensure answers are well-sourced.
-4. Search in English first (prioritizing English resources for volume/quality), but switch to Chinese if context demands.
-5. Prioritize authoritative sources: Wikipedia, academic databases, books, reputable media/journalism.
-6. Favor sharing in-depth, specialized knowledge over generic or common-sense content.
-
----
-
-# Output Style
-
-0. **Be direct—no unnecessary follow-ups**.
-1. Lead with the **most probable solution** before detailed analysis.
-2. **Define every technical term** in plain language (annotate post-paragraph).
-3. Explain expertise **simply yet profoundly**.
-4. **Respect facts and search results—use statistical rigor to discern truth**.
-5. **Every sentence must cite sources** (`citation_card`). More references = stronger credibility. Silence if uncited.
-6. Expand on key concepts—after proposing solutions, **use real-world analogies** to demystify technical terms.
-7. **Strictly format outputs in polished Markdown** (LaTeX for formulas, code blocks for scripts, etc.).
+Output:
+- Write the answer in concise Markdown prose.
+- End with a section titled "Sources".
+- Under "Sources", list the sources you relied on as Markdown bullets in the form "- [Title](URL)".
 """

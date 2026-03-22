@@ -2,10 +2,13 @@ import os
 import json
 from pathlib import Path
 
+
 class Config:
-    _instance = None
+    _instance: "Config | None" = None
+    _config_file: Path | None
+    _cached_model: str | None
     _SETUP_COMMAND = (
-        'claude mcp add-json grok-search --scope user '
+        "claude mcp add-json grok-search --scope user "
         '\'{"type":"stdio","command":"uvx","args":["--from",'
         '"git+https://github.com/GuDaStudio/GrokSearch","grok-search"],'
         '"env":{"GUDA_API_KEY":"your-guda-api-key"}}\''
@@ -13,7 +16,7 @@ class Config:
     _DEFAULT_MODEL = "grok-4.20-beta"
     _DEFAULT_GUDA_BASE_URL = "https://code.guda.studio"
 
-    def __new__(cls):
+    def __new__(cls) -> "Config":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._config_file = None
@@ -36,14 +39,14 @@ class Config:
         if not self.config_file.exists():
             return {}
         try:
-            with open(self.config_file, 'r', encoding='utf-8') as f:
+            with open(self.config_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             return {}
 
     def _save_config_file(self, config_data: dict) -> None:
         try:
-            with open(self.config_file, 'w', encoding='utf-8') as f:
+            with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, ensure_ascii=False, indent=2)
         except IOError as e:
             raise ValueError(f"无法保存配置文件: {str(e)}")
@@ -169,6 +172,7 @@ class Config:
             or self._DEFAULT_MODEL
         )
         self._cached_model = self._apply_model_suffix(model)
+        assert self._cached_model is not None
         return self._cached_model
 
     def set_model(self, model: str) -> None:
@@ -198,7 +202,9 @@ class Config:
 
         info = {
             "GUDA_BASE_URL": self.guda_base_url,
-            "GUDA_API_KEY": self._mask_api_key(self.guda_api_key) if self.guda_api_key else "未配置",
+            "GUDA_API_KEY": self._mask_api_key(self.guda_api_key)
+            if self.guda_api_key
+            else "未配置",
             "GROK_API_URL": api_url,
             "GROK_API_KEY": api_key_masked,
             "GROK_MODEL": self.grok_model,
@@ -207,11 +213,16 @@ class Config:
             "GROK_LOG_DIR": str(self.log_dir),
             "TAVILY_API_URL": self.tavily_api_url,
             "TAVILY_ENABLED": self.tavily_enabled,
-            "TAVILY_API_KEY": self._mask_api_key(self.tavily_api_key) if self.tavily_api_key else "未配置",
+            "TAVILY_API_KEY": self._mask_api_key(self.tavily_api_key)
+            if self.tavily_api_key
+            else "未配置",
             "FIRECRAWL_API_URL": self.firecrawl_api_url,
-            "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key) if self.firecrawl_api_key else "未配置",
+            "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key)
+            if self.firecrawl_api_key
+            else "未配置",
             "config_status": config_status,
         }
         return info
+
 
 config = Config()

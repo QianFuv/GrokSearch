@@ -2,12 +2,24 @@ import httpx
 import json
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import List, Optional
-from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
+from typing import Any, Optional
+
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 from tenacity.wait import wait_base
-from zoneinfo import ZoneInfo
-from .base import BaseSearchProvider, SearchResult
-from ..utils import search_prompt, fetch_prompt, url_describe_prompt, rank_sources_prompt
+
+from .base import BaseSearchProvider
+from ..utils import (
+    fetch_prompt,
+    rank_sources_prompt,
+    sanitize_model_output,
+    search_prompt,
+    url_describe_prompt,
+)
 from ..logger import log_info
 from ..config import config
 
@@ -38,21 +50,54 @@ def _needs_time_context(query: str) -> bool:
     """检查查询是否需要时间上下文"""
     # 中文时间相关关键词
     cn_keywords = [
-        "当前", "现在", "今天", "明天", "昨天",
-        "本周", "上周", "下周", "这周",
-        "本月", "上月", "下月", "这个月",
-        "今年", "去年", "明年",
-        "最新", "最近", "近期", "刚刚", "刚才",
-        "实时", "即时", "目前",
+        "当前",
+        "现在",
+        "今天",
+        "明天",
+        "昨天",
+        "本周",
+        "上周",
+        "下周",
+        "这周",
+        "本月",
+        "上月",
+        "下月",
+        "这个月",
+        "今年",
+        "去年",
+        "明年",
+        "最新",
+        "最近",
+        "近期",
+        "刚刚",
+        "刚才",
+        "实时",
+        "即时",
+        "目前",
     ]
     # 英文时间相关关键词
     en_keywords = [
-        "current", "now", "today", "tomorrow", "yesterday",
-        "this week", "last week", "next week",
-        "this month", "last month", "next month",
-        "this year", "last year", "next year",
-        "latest", "recent", "recently", "just now",
-        "real-time", "realtime", "up-to-date",
+        "current",
+        "now",
+        "today",
+        "tomorrow",
+        "yesterday",
+        "this week",
+        "last week",
+        "next week",
+        "this month",
+        "last month",
+        "next month",
+        "this year",
+        "last year",
+        "next year",
+        "latest",
+        "recent",
+        "recently",
+        "just now",
+        "real-time",
+        "realtime",
+        "up-to-date",
     ]
 
     query_lower = query.lower()
@@ -67,12 +112,21 @@ def _needs_time_context(query: str) -> bool:
 
     return False
 
+
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 def _is_retryable_exception(exc) -> bool:
     """检查异常是否可重试"""
-    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError, httpx.RemoteProtocolError)):
+    if isinstance(
+        exc,
+        (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.ConnectError,
+            httpx.RemoteProtocolError,
+        ),
+    ):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in RETRYABLE_STATUS_CODES
@@ -89,7 +143,10 @@ class _WaitWithRetryAfter(wait_base):
     def __call__(self, retry_state):
         if retry_state.outcome and retry_state.outcome.failed:
             exc = retry_state.outcome.exception()
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+            if (
+                isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code == 429
+            ):
                 retry_after = self._parse_retry_after(exc.response)
                 if retry_after is not None:
                     return retry_after
@@ -125,7 +182,14 @@ class GrokSearchProvider(BaseSearchProvider):
     def get_provider_name(self) -> str:
         return "Grok"
 
-    async def search(self, query: str, platform: str = "", min_results: int = 3, max_results: int = 10, ctx=None) -> List[SearchResult]:
+    async def search(
+        self,
+        query: str,
+        platform: str = "",
+        min_results: int = 3,
+        max_results: int = 10,
+        ctx=None,
+    ) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -133,9 +197,15 @@ class GrokSearchProvider(BaseSearchProvider):
         platform_prompt = ""
 
         if platform:
-            platform_prompt = "\n\nYou should search the web for the information you need, and focus on these platform: " + platform + "\n"
+            platform_prompt = (
+                "\n\nYou should search the web for the information you need, and focus on these platform: "
+                + platform
+                + "\n"
+            )
 
-        time_context = get_local_time_info() + "\n"
+        time_context = (
+            get_local_time_info() + "\n" if _needs_time_context(query) else ""
+        )
 
         payload = {
             "model": self.model,
@@ -149,7 +219,9 @@ class GrokSearchProvider(BaseSearchProvider):
             "stream": True,
         }
 
-        await log_info(ctx, f"platform_prompt: { query + platform_prompt}", config.debug_enabled)
+        await log_info(
+            ctx, f"platform_prompt: {query + platform_prompt}", config.debug_enabled
+        )
 
         return await self._execute_stream_with_retry(headers, payload, ctx)
 
@@ -165,21 +237,26 @@ class GrokSearchProvider(BaseSearchProvider):
                     "role": "system",
                     "content": fetch_prompt,
                 },
-                {"role": "user", "content": url + "\n获取该网页内容并返回其结构化Markdown格式" },
+                {
+                    "role": "user",
+                    "content": url + "\n获取该网页内容并返回其结构化Markdown格式",
+                },
             ],
             "stream": True,
         }
         return await self._execute_stream_with_retry(headers, payload, ctx)
 
-    async def _parse_streaming_response(self, response, ctx=None) -> str:
+    async def _parse_streaming_response(
+        self, response: httpx.Response, ctx=None
+    ) -> str:
         content = ""
-        full_body_buffer = [] 
-        
+        full_body_buffer = []
+
         async for line in response.aiter_lines():
             line = line.strip()
             if not line:
                 continue
-            
+
             full_body_buffer.append(line)
 
             # 兼容 "data: {...}" 和 "data:{...}" 两种 SSE 格式
@@ -197,7 +274,7 @@ class GrokSearchProvider(BaseSearchProvider):
                             content += delta["content"]
                 except (json.JSONDecodeError, IndexError):
                     continue
-                
+
         if not content and full_body_buffer:
             try:
                 full_text = "".join(full_body_buffer)
@@ -207,19 +284,25 @@ class GrokSearchProvider(BaseSearchProvider):
                     content = message.get("content", "")
             except json.JSONDecodeError:
                 pass
-        
+
+        content = sanitize_model_output(content)
+
         await log_info(ctx, f"content: {content}", config.debug_enabled)
 
         return content
 
-    async def _execute_stream_with_retry(self, headers: dict, payload: dict, ctx=None) -> str:
+    async def _execute_stream_with_retry(
+        self, headers: dict[str, str], payload: dict[str, Any], ctx=None
+    ) -> str:
         """执行带重试机制的流式 HTTP 请求"""
         timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
 
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(config.retry_max_attempts + 1),
-                wait=_WaitWithRetryAfter(config.retry_multiplier, config.retry_max_wait),
+                wait=_WaitWithRetryAfter(
+                    config.retry_multiplier, config.retry_max_wait
+                ),
                 retry=retry_if_exception(_is_retryable_exception),
                 reraise=True,
             ):
@@ -232,6 +315,7 @@ class GrokSearchProvider(BaseSearchProvider):
                     ) as response:
                         response.raise_for_status()
                         return await self._parse_streaming_response(response, ctx)
+        raise RuntimeError("Search request ended without a response")
 
     async def describe_url(self, url: str, ctx=None) -> dict:
         """让 Grok 阅读单个 URL 并返回 title + extracts"""
@@ -256,7 +340,9 @@ class GrokSearchProvider(BaseSearchProvider):
                 extracts = line[9:].strip()
         return {"title": title, "extracts": extracts, "url": url}
 
-    async def rank_sources(self, query: str, sources_text: str, total: int, ctx=None) -> list[int]:
+    async def rank_sources(
+        self, query: str, sources_text: str, total: int, ctx=None
+    ) -> list[int]:
         """让 Grok 按查询相关度对信源排序，返回排序后的序号列表"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",

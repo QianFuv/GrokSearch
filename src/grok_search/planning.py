@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Literal
 import uuid
+from typing import Literal, Optional, cast
+
+from pydantic import BaseModel, Field
 
 
 class IntentOutput(BaseModel):
@@ -11,14 +12,21 @@ class IntentOutput(BaseModel):
     time_sensitivity: Literal["realtime", "recent", "historical", "irrelevant"] = Field(
         description="realtime=today, recent=days/weeks, historical=months+, irrelevant=timeless"
     )
-    domain: Optional[str] = Field(default=None, description="Specific domain if identifiable")
-    premise_valid: Optional[bool] = Field(default=None, description="False if the question contains a flawed assumption")
-    ambiguities: Optional[list[str]] = Field(default=None, description="Unresolved ambiguities that may affect search direction")
+    domain: Optional[str] = Field(
+        default=None, description="Specific domain if identifiable"
+    )
+    premise_valid: Optional[bool] = Field(
+        default=None, description="False if the question contains a flawed assumption"
+    )
+    ambiguities: Optional[list[str]] = Field(
+        default=None,
+        description="Unresolved ambiguities that may affect search direction",
+    )
     unverified_terms: Optional[list[str]] = Field(
         default=None,
         description="External classifications, rankings, or taxonomies that may be incomplete or outdated "
         "in training data (e.g., 'CCF-A', 'Fortune 500', 'OWASP Top 10'). "
-        "Each should become a prerequisite sub-query in Phase 3."
+        "Each should become a prerequisite sub-query in Phase 3.",
     )
 
 
@@ -35,15 +43,28 @@ class SubQuery(BaseModel):
     id: str = Field(description="Unique identifier (e.g., 'sq1')")
     goal: str
     expected_output: str = Field(description="What a successful result looks like")
-    tool_hint: Optional[str] = Field(default=None, description="Suggested tool: web_search | web_fetch | web_map")
-    boundary: str = Field(description="What this sub-query explicitly excludes — MUST state mutual exclusion with sibling sub-queries, not just the broader domain")
-    depends_on: Optional[list[str]] = Field(default=None, description="IDs of prerequisite sub-queries")
+    tool_hint: Optional[str] = Field(
+        default=None, description="Suggested tool: web_search | web_fetch | web_map"
+    )
+    boundary: str = Field(
+        description="What this sub-query explicitly excludes — MUST state mutual exclusion with sibling sub-queries, not just the broader domain"
+    )
+    depends_on: Optional[list[str]] = Field(
+        default=None, description="IDs of prerequisite sub-queries"
+    )
 
 
 class SearchTerm(BaseModel):
-    term: str = Field(description="Search query string. MUST be ≤8 words. Drop redundant synonyms (e.g., use 'RAG' not 'RAG retrieval augmented generation').")
-    purpose: str = Field(description="Single sub-query ID this term serves (e.g., 'sq2'). ONE term per sub-query — do NOT combine like 'sq1+sq2'.")
-    round: int = Field(ge=1, description="Execution round: 1=broad discovery, 2+=targeted follow-up refined by round 1 findings")
+    term: str = Field(
+        description="Search query string. MUST be ≤8 words. Drop redundant synonyms (e.g., use 'RAG' not 'RAG retrieval augmented generation')."
+    )
+    purpose: str = Field(
+        description="Single sub-query ID this term serves (e.g., 'sq2'). ONE term per sub-query — do NOT combine like 'sq1+sq2'."
+    )
+    round: int = Field(
+        ge=1,
+        description="Execution round: 1=broad discovery, 2+=targeted follow-up refined by round 1 findings",
+    )
 
 
 class StrategyOutput(BaseModel):
@@ -51,7 +72,9 @@ class StrategyOutput(BaseModel):
         description="broad_first=wide then narrow, narrow_first=precise then expand, targeted=known-item"
     )
     search_terms: list[SearchTerm]
-    fallback_plan: Optional[str] = Field(default=None, description="Fallback if primary searches fail")
+    fallback_plan: Optional[str] = Field(
+        default=None, description="Fallback if primary searches fail"
+    )
 
 
 class ToolPlanItem(BaseModel):
@@ -62,7 +85,9 @@ class ToolPlanItem(BaseModel):
 
 
 class ExecutionOrderOutput(BaseModel):
-    parallel: list[list[str]] = Field(description="Groups of sub-query IDs runnable in parallel")
+    parallel: list[list[str]] = Field(
+        description="Groups of sub-query IDs runnable in parallel"
+    )
     sequential: list[str] = Field(description="Sub-query IDs that must run in order")
     estimated_rounds: int = Field(ge=1)
 
@@ -78,7 +103,13 @@ PHASE_NAMES = [
 
 REQUIRED_PHASES: dict[int, set[str]] = {
     1: {"intent_analysis", "complexity_assessment", "query_decomposition"},
-    2: {"intent_analysis", "complexity_assessment", "query_decomposition", "search_strategy", "tool_selection"},
+    2: {
+        "intent_analysis",
+        "complexity_assessment",
+        "query_decomposition",
+        "search_strategy",
+        "tool_selection",
+    },
     3: set(PHASE_NAMES),
 }
 
@@ -145,31 +176,51 @@ class PlanningEngine:
 
         target = revises_phase if is_revision and revises_phase else phase
         if target not in PHASE_NAMES:
-            return {"error": f"Unknown phase: {target}. Valid: {', '.join(PHASE_NAMES)}"}
+            return {
+                "error": f"Unknown phase: {target}. Valid: {', '.join(PHASE_NAMES)}"
+            }
 
         if target in _ACCUMULATIVE_LIST_PHASES:
             if is_revision:
                 session.phases[target] = PhaseRecord(
-                    phase=target, thought=thought,
-                    data=[phase_data] if not isinstance(phase_data, list) else phase_data,
+                    phase=target,
+                    thought=thought,
+                    data=[phase_data]
+                    if not isinstance(phase_data, list)
+                    else phase_data,
                     confidence=confidence,
                 )
-            elif target in session.phases and isinstance(session.phases[target].data, list):
-                session.phases[target].data.append(phase_data)
+            elif target in session.phases and isinstance(
+                session.phases[target].data, list
+            ):
+                existing_items = cast(list, session.phases[target].data)
+                existing_items.append(phase_data)
                 session.phases[target].thought = thought
                 session.phases[target].confidence = confidence
             else:
                 session.phases[target] = PhaseRecord(
-                    phase=target, thought=thought, data=[phase_data], confidence=confidence,
+                    phase=target,
+                    thought=thought,
+                    data=[phase_data],
+                    confidence=confidence,
                 )
         elif target == _MERGE_STRATEGY_PHASE:
             existing = session.phases.get(target)
             if is_revision:
                 session.phases[target] = PhaseRecord(
-                    phase=target, thought=thought, data=phase_data, confidence=confidence,
+                    phase=target,
+                    thought=thought,
+                    data=phase_data,
+                    confidence=confidence,
                 )
-            elif existing and isinstance(existing.data, dict) and isinstance(phase_data, dict):
-                existing.data.setdefault("search_terms", []).extend(phase_data.get("search_terms", []))
+            elif (
+                existing
+                and isinstance(existing.data, dict)
+                and isinstance(phase_data, dict)
+            ):
+                existing.data.setdefault("search_terms", []).extend(
+                    phase_data.get("search_terms", [])
+                )
                 if phase_data.get("approach"):
                     existing.data["approach"] = phase_data["approach"]
                 if phase_data.get("fallback_plan"):
@@ -178,11 +229,17 @@ class PlanningEngine:
                 existing.confidence = confidence
             else:
                 session.phases[target] = PhaseRecord(
-                    phase=target, thought=thought, data=phase_data, confidence=confidence,
+                    phase=target,
+                    thought=thought,
+                    data=phase_data,
+                    confidence=confidence,
                 )
         else:
             session.phases[target] = PhaseRecord(
-                phase=target, thought=thought, data=phase_data, confidence=confidence,
+                phase=target,
+                thought=thought,
+                data=phase_data,
+                confidence=confidence,
             )
 
         if target == "complexity_assessment" and isinstance(phase_data, dict):
@@ -198,7 +255,11 @@ class PlanningEngine:
             "plan_complete": complete,
         }
 
-        remaining = [p for p in PHASE_NAMES if p in session.required_phases() and p not in session.phases]
+        remaining = [
+            p
+            for p in PHASE_NAMES
+            if p in session.required_phases() and p not in session.phases
+        ]
         if remaining:
             result["phases_remaining"] = remaining
 

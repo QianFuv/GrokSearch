@@ -1,0 +1,2 @@
+[console_scripts]
+grok-search = grok_search.server:main

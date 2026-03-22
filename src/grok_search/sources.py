@@ -113,7 +113,9 @@ def _split_function_call_sources(text: str) -> tuple[str, list[dict]] | None:
     return None
 
 
-def _extract_balanced_call_at_end(text: str, open_paren_idx: int) -> tuple[int, str] | None:
+def _extract_balanced_call_at_end(
+    text: str, open_paren_idx: int
+) -> tuple[int, str] | None:
     if open_paren_idx < 0 or open_paren_idx >= len(text) or text[open_paren_idx] != "(":
         return None
 
@@ -285,7 +287,11 @@ def _normalize_sources(data: Any) -> list[dict]:
 
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             title, url = item[0], item[1]
-            if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in seen:
+            if (
+                isinstance(url, str)
+                and url.startswith(("http://", "https://"))
+                and url not in seen
+            ):
                 seen.add(url)
                 out: dict = {"url": url}
                 if isinstance(title, str) and title.strip():
@@ -294,20 +300,23 @@ def _normalize_sources(data: Any) -> list[dict]:
             continue
 
         if isinstance(item, dict):
-            url = item.get("url") or item.get("href") or item.get("link")
-            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            url_value = item.get("url") or item.get("href") or item.get("link")
+            if not isinstance(url_value, str) or not url_value.startswith(
+                ("http://", "https://")
+            ):
                 continue
+            url = url_value
             if url in seen:
                 continue
             seen.add(url)
-            out: dict = {"url": url}
+            source_item: dict = {"url": url}
             title = item.get("title") or item.get("name") or item.get("label")
             if isinstance(title, str) and title.strip():
-                out["title"] = title.strip()
+                source_item["title"] = title.strip()
             desc = item.get("description") or item.get("snippet") or item.get("content")
             if isinstance(desc, str) and desc.strip():
-                out["description"] = desc.strip()
-            normalized.append(out)
+                source_item["description"] = desc.strip()
+            normalized.append(source_item)
             continue
 
     return normalized
