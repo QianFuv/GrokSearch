@@ -5,7 +5,45 @@ Regression tests for the web_search response cleanup behavior.
 import pytest
 
 from grok_search import server
+from grok_search.providers.grok import GrokSearchProvider
 from grok_search.utils import sanitize_model_output
+
+
+class _FakeStreamResponse:
+    """
+    Minimal async streaming response used for provider parsing tests.
+
+    Args:
+        lines: Streamed text lines exposed by aiter_lines.
+
+    Returns:
+        None.
+    """
+
+    def __init__(self, lines: list[str]) -> None:
+        """
+        Store the fake stream lines for later iteration.
+
+        Args:
+            lines: Streamed text lines exposed by aiter_lines.
+
+        Returns:
+            None.
+        """
+        self._lines = lines
+
+    async def aiter_lines(self):
+        """
+        Yield the configured lines as an async iterator.
+
+        Args:
+            None.
+
+        Returns:
+            An async iterator over the configured lines.
+        """
+        for line in self._lines:
+            yield line
 
 
 def test_sanitize_model_output_removes_think_and_meta_refusal():
@@ -34,6 +72,30 @@ Sources
     assert "<think>" not in cleaned
     assert 'custom "system" instructions' not in cleaned
     assert cleaned.startswith("The capital of France is Paris.")
+
+
+@pytest.mark.asyncio
+async def test_parse_streaming_response_accepts_message_content_payload():
+    """
+    Verify that the provider can parse non-delta message payloads.
+
+    Args:
+        None.
+
+    Returns:
+        None.
+    """
+    provider = GrokSearchProvider("https://example.invalid/v1", "test-key")
+    response = _FakeStreamResponse(
+        [
+            'data: {"choices":[{"message":{"content":"Structured answer"}}]}',
+            "data: [DONE]",
+        ]
+    )
+
+    result = await provider._parse_streaming_response(response)
+
+    assert result == "Structured answer"
 
 
 @pytest.mark.asyncio
@@ -98,6 +160,43 @@ async def test_web_search_reports_missing_body_when_only_sources_exist(monkeypat
 
     assert (
         result["content"]
-        == "Search completed, but the upstream response did not contain a parsable answer body. Call get_sources to inspect the sources."
+        == "Search completed, but the upstream response did not contain "
+        "a parsable answer body. Call get_sources to inspect the sources."
     )
+    assert result["sources_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_web_search_retries_when_first_response_only_contains_sources(
+    monkeypatch,
+):
+    """
+    Verify that semantic retries recover from source-only upstream responses.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setenv("GROK_API_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("GROK_API_KEY", "test-key")
+
+    calls = {"count": 0}
+
+    async def flaky(self, query, platform="", min_results=3, max_results=10, ctx=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return "Sources\n- [FastMCP](https://gofastmcp.com)"
+        return (
+            "FastMCP is a framework for building MCP applications.\n\n"
+            "Sources\n- [FastMCP](https://gofastmcp.com)"
+        )
+
+    monkeypatch.setattr(server.GrokSearchProvider, "search", flaky)
+
+    result = await server.web_search("What is FastMCP?")
+
+    assert calls["count"] == 2
+    assert result["content"] == "FastMCP is a framework for building MCP applications."
     assert result["sources_count"] == 1

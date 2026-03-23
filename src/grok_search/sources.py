@@ -1,28 +1,40 @@
+"""
+Helpers for splitting answer text from trailing source listings.
+"""
+
 import ast
+import asyncio
 import json
 import re
 import uuid
 from collections import OrderedDict
 from typing import Any
 
-import asyncio
-
 from .utils import extract_unique_urls
 
-
 _MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_SOURCE_LABEL_PATTERN = (
+    r"(sources?|references?|citations?|resources?|links?|further reading|read more|"
+    r"信源|参考资料|参考|引用|来源列表|来源)"
+)
 _SOURCES_HEADING_PATTERN = re.compile(
     r"(?im)^"
     r"(?:#{1,6}\s*)?"
-    r"(?:\*\*|__)?\s*"
-    r"(sources?|references?|citations?|信源|参考资料|参考|引用|来源列表|来源)"
-    r"\s*(?:\*\*|__)?"
+    r"(?:\*\*|__)?\s*" + _SOURCE_LABEL_PATTERN + r"\s*(?:\*\*|__)?"
     r"(?:\s*[（(][^)\n]*[)）])?"
     r"\s*[:：]?\s*$"
+)
+_INLINE_SOURCES_HEADING_PATTERN = re.compile(
+    r"(?im)^"
+    r"(?:#{1,6}\s*)?"
+    r"(?:\*\*|__)?\s*" + _SOURCE_LABEL_PATTERN + r"\s*(?:\*\*|__)?"
+    r"(?:\s*[（(][^)\n]*[)）])?"
+    r"\s*[:：]\s+.+$"
 )
 _SOURCES_FUNCTION_PATTERN = re.compile(
     r"(?im)(^|\n)\s*(sources|source|citations|citation|references|reference|citation_card|source_cards|source_card)\s*\("
 )
+_FOOTNOTE_LINK_LINE_PATTERN = re.compile(r"^\[[^\]]+\]:\s*https?://\S+$")
 
 
 def new_session_id() -> str:
@@ -68,6 +80,15 @@ def merge_sources(*source_lists: list[dict]) -> list[dict]:
 
 
 def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
+    """
+    Split an answer body from any trailing source listings.
+
+    Args:
+        text: The raw model output text.
+
+    Returns:
+        A tuple of cleaned answer text and normalized source records.
+    """
     raw = (text or "").strip()
     if not raw:
         return "", []
@@ -80,6 +101,10 @@ def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
     if split:
         return split
 
+    split = _split_inline_heading_sources(raw)
+    if split:
+        return split
+
     split = _split_details_block_sources(raw)
     if split:
         return split
@@ -89,6 +114,32 @@ def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
         return split
 
     return raw, []
+
+
+def _split_inline_heading_sources(text: str) -> tuple[str, list[dict]] | None:
+    """
+    Split trailing source sections that keep URLs on the same heading line.
+
+    Args:
+        text: The raw model output text.
+
+    Returns:
+        A tuple of answer text and sources when a matching block is found.
+    """
+    matches = list(_INLINE_SOURCES_HEADING_PATTERN.finditer(text))
+    if not matches:
+        return None
+
+    for match in reversed(matches):
+        start = match.start()
+        sources_text = text[start:]
+        sources = _extract_sources_from_text(sources_text)
+        if not sources:
+            continue
+        answer = text[:start].rstrip()
+        return answer, sources
+
+    return None
 
 
 def _split_function_call_sources(text: str) -> tuple[str, list[dict]] | None:
@@ -229,14 +280,23 @@ def _split_details_block_sources(text: str) -> tuple[str, list[dict]] | None:
 
 
 def _is_link_only_line(line: str) -> bool:
+    """
+    Check whether a line is effectively only a source link.
+
+    Args:
+        line: A single text line.
+
+    Returns:
+        True when the line represents a standalone source link.
+    """
     stripped = re.sub(r"^\s*(?:[-*]|\d+\.)\s*", "", line).strip()
     if not stripped:
         return False
     if stripped.startswith(("http://", "https://")):
         return True
-    if _MD_LINK_PATTERN.search(stripped):
+    if _FOOTNOTE_LINK_LINE_PATTERN.fullmatch(stripped):
         return True
-    return False
+    return bool(_MD_LINK_PATTERN.search(stripped))
 
 
 def _parse_sources_payload(payload: str) -> list[dict]:

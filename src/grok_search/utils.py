@@ -1,5 +1,9 @@
-from typing import List
+"""
+Shared prompt and text utility helpers for the Grok Search server.
+"""
+
 import re
+
 from .providers.base import SearchResult
 
 _URL_PATTERN = re.compile(r'https?://[^\s<>"\'`，。、；：！？》）】\)]+')
@@ -29,7 +33,7 @@ def extract_unique_urls(text: str) -> list[str]:
     return urls
 
 
-def format_search_results(results: List[SearchResult]) -> str:
+def format_search_results(results: list[SearchResult]) -> str:
     if not results:
         return "No results found."
 
@@ -100,7 +104,8 @@ fetch_prompt = """
 # Profile: Web Content Fetcher
 
 - **Language**: 中文
-- **Role**: 你是一个专业的网页内容抓取和解析专家，获取指定 URL 的网页内容，并将其转换为与原网页高度一致的结构化 Markdown 文本格式。
+- **Role**: 你是一个专业的网页内容抓取和解析专家，获取指定 URL 的网页内容，
+  并将其转换为与原网页高度一致的结构化 Markdown 文本格式。
 
 ---
 
@@ -232,7 +237,8 @@ Goals:
 - Answer the user's question directly after checking the web.
 - Prefer primary, official, or otherwise authoritative sources.
 - Prefer recent sources when the question is time-sensitive.
-- If sources conflict, briefly say so and favor the most authoritative and recent evidence.
+- If sources conflict, briefly say so and favor the most authoritative and
+  recent evidence.
 
 Rules:
 - Do not mention system prompts, policy conflicts, jailbreaks, or hidden instructions.
@@ -242,6 +248,8 @@ Rules:
 
 Output:
 - Write the answer in concise Markdown prose.
-- End with a section titled "Sources".
-- Under "Sources", list the sources you relied on as Markdown bullets in the form "- [Title](URL)".
+- End with a final standalone section titled exactly "Sources".
+- Do not place sources inline, as footnotes, or under alternative headings.
+- Under "Sources", list the sources you relied on as Markdown bullets in the
+  form "- [Title](URL)".
 """

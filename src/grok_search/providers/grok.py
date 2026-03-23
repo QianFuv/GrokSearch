@@ -1,9 +1,13 @@
-import httpx
-import json
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from typing import Any, Optional
+"""
+Grok provider implementations for search and page-level tools.
+"""
 
+import json
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from typing import Any
+
+import httpx
 from tenacity import (
     AsyncRetrying,
     retry_if_exception,
@@ -12,7 +16,8 @@ from tenacity import (
 )
 from tenacity.wait import wait_base
 
-from .base import BaseSearchProvider
+from ..config import config
+from ..logger import log_info
 from ..utils import (
     fetch_prompt,
     rank_sources_prompt,
@@ -20,8 +25,96 @@ from ..utils import (
     search_prompt,
     url_describe_prompt,
 )
-from ..logger import log_info
-from ..config import config
+from .base import BaseSearchProvider
+
+
+def _extract_text_segments(content: Any) -> list[str]:
+    """
+    Normalize OpenAI-compatible content payloads into plain text segments.
+
+    Args:
+        content: A content payload from an SSE delta or message object.
+
+    Returns:
+        A list of extracted text fragments in the original order.
+    """
+    if isinstance(content, str):
+        return [content]
+
+    if isinstance(content, list):
+        segments: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    segments.append(text)
+                    continue
+                nested = item.get("content")
+                if nested is not None:
+                    segments.extend(_extract_text_segments(nested))
+            elif isinstance(item, str) and item:
+                segments.append(item)
+        return segments
+
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str) and text:
+            return [text]
+        nested = content.get("content")
+        if nested is not None:
+            return _extract_text_segments(nested)
+
+    return []
+
+
+def _extract_choice_text(choice: dict[str, Any]) -> str:
+    """
+    Extract text content from a single chat completion choice payload.
+
+    Args:
+        choice: A single completion choice object.
+
+    Returns:
+        The extracted text for that choice, or an empty string.
+    """
+    text_segments: list[str] = []
+
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        for key in ("content", "text"):
+            text_segments.extend(_extract_text_segments(delta.get(key)))
+
+    message = choice.get("message")
+    if isinstance(message, dict):
+        for key in ("content", "text"):
+            text_segments.extend(_extract_text_segments(message.get(key)))
+
+    for key in ("content", "text"):
+        text_segments.extend(_extract_text_segments(choice.get(key)))
+
+    return "".join(segment for segment in text_segments if segment)
+
+
+def _extract_text_from_payload(payload: dict[str, Any]) -> str:
+    """
+    Extract response text from a streamed or non-streamed completion payload.
+
+    Args:
+        payload: A decoded JSON payload from the upstream API.
+
+    Returns:
+        The extracted text fragment, or an empty string.
+    """
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        fragments = [
+            _extract_choice_text(choice)
+            for choice in choices
+            if isinstance(choice, dict)
+        ]
+        return "".join(fragment for fragment in fragments if fragment)
+
+    return ""
 
 
 def get_local_time_info() -> str:
@@ -32,7 +125,7 @@ def get_local_time_info() -> str:
         local_now = datetime.now(local_tz)
     except Exception:
         # 降级使用 UTC
-        local_now = datetime.now(timezone.utc)
+        local_now = datetime.now(UTC)
 
     # 格式化时间信息
     weekdays_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -106,11 +199,7 @@ def _needs_time_context(query: str) -> bool:
         if keyword in query:
             return True
 
-    for keyword in en_keywords:
-        if keyword in query_lower:
-            return True
-
-    return False
+    return any(keyword in query_lower for keyword in en_keywords)
 
 
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
@@ -154,7 +243,7 @@ class _WaitWithRetryAfter(wait_base):
                 return self._base_wait(retry_state) + self._protocol_error_base
         return self._base_wait(retry_state)
 
-    def _parse_retry_after(self, response: httpx.Response) -> Optional[float]:
+    def _parse_retry_after(self, response: httpx.Response) -> float | None:
         """解析 Retry-After 头（支持秒数或 HTTP 日期格式）"""
         header = response.headers.get("Retry-After")
         if not header:
@@ -167,8 +256,8 @@ class _WaitWithRetryAfter(wait_base):
         try:
             retry_dt = parsedate_to_datetime(header)
             if retry_dt.tzinfo is None:
-                retry_dt = retry_dt.replace(tzinfo=timezone.utc)
-            delay = (retry_dt - datetime.now(timezone.utc)).total_seconds()
+                retry_dt = retry_dt.replace(tzinfo=UTC)
+            delay = (retry_dt - datetime.now(UTC)).total_seconds()
             return max(0.0, delay)
         except (TypeError, ValueError):
             return None
@@ -198,9 +287,9 @@ class GrokSearchProvider(BaseSearchProvider):
 
         if platform:
             platform_prompt = (
-                "\n\nYou should search the web for the information you need, and focus on these platform: "
-                + platform
-                + "\n"
+                "\n\nYou should search the web for the information you need, "
+                "and focus on these platform: "
+                f"{platform}\n"
             )
 
         time_context = (
@@ -249,8 +338,18 @@ class GrokSearchProvider(BaseSearchProvider):
     async def _parse_streaming_response(
         self, response: httpx.Response, ctx=None
     ) -> str:
+        """
+        Parse SSE or JSON completion responses into cleaned text.
+
+        Args:
+            response: The upstream HTTP response object.
+            ctx: Optional FastMCP context used for logging.
+
+        Returns:
+            The cleaned model output text.
+        """
         content = ""
-        full_body_buffer = []
+        full_body_buffer: list[str] = []
 
         async for line in response.aiter_lines():
             line = line.strip()
@@ -259,31 +358,32 @@ class GrokSearchProvider(BaseSearchProvider):
 
             full_body_buffer.append(line)
 
-            # 兼容 "data: {...}" 和 "data:{...}" 两种 SSE 格式
-            if line.startswith("data:"):
-                if line in ("data: [DONE]", "data:[DONE]"):
-                    continue
-                try:
-                    # 去掉 "data:" 前缀，并去除可能的空格
-                    json_str = line[5:].lstrip()
-                    data = json.loads(json_str)
-                    choices = data.get("choices", [])
-                    if choices and len(choices) > 0:
-                        delta = choices[0].get("delta", {})
-                        if "content" in delta:
-                            content += delta["content"]
-                except (json.JSONDecodeError, IndexError):
-                    continue
+            if line.startswith("event:"):
+                continue
+
+            payload_text = line[5:].lstrip() if line.startswith("data:") else line
+            if payload_text == "[DONE]":
+                continue
+
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+
+            content += _extract_text_from_payload(payload)
 
         if not content and full_body_buffer:
-            try:
-                full_text = "".join(full_body_buffer)
-                data = json.loads(full_text)
-                if "choices" in data and len(data["choices"]) > 0:
-                    message = data["choices"][0].get("message", {})
-                    content = message.get("content", "")
-            except json.JSONDecodeError:
-                pass
+            for item in full_body_buffer:
+                if item.startswith("event:"):
+                    continue
+                payload_text = item[5:].lstrip() if item.startswith("data:") else item
+                if payload_text == "[DONE]":
+                    continue
+                try:
+                    payload = json.loads(payload_text)
+                except json.JSONDecodeError:
+                    continue
+                content += _extract_text_from_payload(payload)
 
         content = sanitize_model_output(content)
 

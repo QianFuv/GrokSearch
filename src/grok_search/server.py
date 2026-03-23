@@ -1,7 +1,13 @@
+"""
+FastMCP server exposing Grok search and Tavily-backed web tools.
+"""
+
 import asyncio
 import sys
+from contextlib import suppress
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
@@ -11,33 +17,187 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 try:
-    from grok_search.providers.grok import GrokSearchProvider
-    from grok_search.logger import log_info
     from grok_search.config import config
+    from grok_search.logger import log_info
+    from grok_search.planning import _split_csv
+    from grok_search.planning import engine as planning_engine
+    from grok_search.providers.grok import GrokSearchProvider
     from grok_search.sources import (
         SourcesCache,
         merge_sources,
         new_session_id,
         split_answer_and_sources,
     )
-    from grok_search.planning import engine as planning_engine, _split_csv
 except ImportError:
-    from .providers.grok import GrokSearchProvider
-    from .logger import log_info
     from .config import config
+    from .logger import log_info
+    from .planning import _split_csv
+    from .planning import engine as planning_engine
+    from .providers.grok import GrokSearchProvider
     from .sources import (
         SourcesCache,
         merge_sources,
         new_session_id,
         split_answer_and_sources,
     )
-    from .planning import engine as planning_engine, _split_csv
 
 mcp = FastMCP("grok-search")
 
 _SOURCES_CACHE = SourcesCache(max_size=256)
 _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
+
+
+def _normalize_site_host(url: str) -> str | None:
+    """
+    Normalize a URL into a lowercase hostname for same-site filtering.
+
+    Args:
+        url: The URL to inspect.
+
+    Returns:
+        The normalized hostname, or None when it cannot be determined.
+    """
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return None
+    return parsed.hostname.lower().rstrip(".")
+
+
+def _hosts_match(base_host: str, candidate_host: str) -> bool:
+    """
+    Check whether two hosts should be treated as the same site.
+
+    Args:
+        base_host: The hostname from the requested base URL.
+        candidate_host: The hostname from a discovered result URL.
+
+    Returns:
+        True when both hosts belong to the same site.
+    """
+    normalized_base = base_host.removeprefix("www.")
+    normalized_candidate = candidate_host.removeprefix("www.")
+    return normalized_base == normalized_candidate
+
+
+def _extract_result_url(item: Any) -> str | None:
+    """
+    Extract a URL string from a Tavily map result item.
+
+    Args:
+        item: A raw result item from the upstream map API.
+
+    Returns:
+        The discovered URL, or None when no usable URL exists.
+    """
+    if isinstance(item, str):
+        return item
+
+    if isinstance(item, dict):
+        for key in ("url", "href", "link"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    return None
+
+
+def _filter_same_site_results(base_url: str, results: list[Any]) -> list[Any]:
+    """
+    Keep only same-site map results for the requested base URL.
+
+    Args:
+        base_url: The original URL passed to the map tool.
+        results: Raw result items returned by the upstream API.
+
+    Returns:
+        Result items whose hosts match the requested site.
+    """
+    base_host = _normalize_site_host(base_url)
+    if not base_host:
+        return results
+
+    filtered: list[Any] = []
+    for item in results:
+        result_url = _extract_result_url(item)
+        if not result_url:
+            continue
+        candidate_host = _normalize_site_host(result_url)
+        if candidate_host and _hosts_match(base_host, candidate_host):
+            filtered.append(item)
+    return filtered
+
+
+def _build_tavily_map_body(
+    url: str,
+    instructions: str | None,
+    max_depth: int,
+    max_breadth: int,
+    limit: int,
+    timeout: int,
+) -> dict[str, Any]:
+    """
+    Build a Tavily-compatible map request with same-site defaults.
+
+    Args:
+        url: The starting URL for the map request.
+        instructions: Optional natural-language filtering instructions.
+        max_depth: The maximum crawl depth.
+        max_breadth: The maximum breadth per page.
+        limit: The total result limit.
+        timeout: The request timeout in seconds.
+
+    Returns:
+        The request payload sent to the upstream map API.
+    """
+    body: dict[str, Any] = {
+        "url": url,
+        "max_depth": max_depth,
+        "max_breadth": max_breadth,
+        "limit": limit,
+        "timeout": timeout,
+    }
+    if instructions:
+        body["instructions"] = instructions
+
+    base_host = _normalize_site_host(url)
+    if base_host:
+        body["allow_external"] = False
+        body["select_domains"] = [base_host]
+
+    return body
+
+
+async def _search_with_answer_retry(
+    grok_provider: "GrokSearchProvider",
+    query: str,
+    platform: str,
+    max_attempts: int = 2,
+) -> str:
+    """
+    Retry a Grok search when the upstream response has no usable answer body.
+
+    Args:
+        grok_provider: The configured Grok provider instance.
+        query: The search query text.
+        platform: Optional platform focus hint.
+        max_attempts: The maximum number of semantic retries.
+
+    Returns:
+        The final raw model response text.
+    """
+    final_result = ""
+    total_attempts = max(1, max_attempts)
+
+    for attempt in range(1, total_attempts + 1):
+        final_result = await grok_provider.search(query, platform)
+        answer, _ = split_answer_and_sources(final_result)
+        if answer.strip():
+            return final_result
+        if attempt < total_attempts:
+            await _sleep_before_retry(attempt)
+
+    return final_result
 
 
 async def _fetch_available_models(api_url: str, api_key: str) -> list[str]:
@@ -164,11 +324,14 @@ def _extra_results_to_sources(tavily_results: list[dict] | None) -> list[dict]:
     name="web_search",
     output_schema=None,
     description="""
-    Before using this tool, please use the plan_intent tool to plan the search carefully.
-    Performs a deep web search based on the given query and returns Grok's answer directly.
+    Before using this tool, please use the plan_intent tool
+    to plan the search carefully.
+    Performs a deep web search based on the given query
+    and returns Grok's answer directly.
 
     This tool extracts sources if provided by upstream, caches them, and returns:
-    - session_id: string (When you feel confused or curious about the main content, use this field to invoke the get_sources tool to obtain the corresponding list of information sources)
+    - session_id: string
+      (Use this field with get_sources to inspect cached sources.)
     - content: string (answer only)
     - sources_count: int
     """,
@@ -178,15 +341,21 @@ async def web_search(
     query: Annotated[str, "Clear, self-contained natural-language search query."],
     platform: Annotated[
         str,
-        "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search.",
+        (
+            "Target platform to focus on (for example, 'Twitter', 'GitHub', "
+            "or 'Reddit'). Leave empty for general web search."
+        ),
     ] = "",
     model: Annotated[
         str,
-        "Optional model ID for this request only. This value is used ONLY when user explicitly provided.",
+        (
+            "Optional model ID for this request only. This value is used only "
+            "when the user explicitly provided it."
+        ),
     ] = "",
     extra_sources: Annotated[
         int,
-        "Number of additional reference results from Tavily. Set 0 to disable. Default 0.",
+        ("Number of additional reference results from Tavily. Set 0 to disable."),
     ] = 0,
 ) -> dict:
     session_id = new_session_id()
@@ -216,7 +385,7 @@ async def web_search(
     tavily_count = extra_sources if extra_sources > 0 and config.tavily_api_key else 0
 
     async def _safe_grok() -> str:
-        return await grok_provider.search(query, platform)
+        return await _search_with_answer_retry(grok_provider, query, platform)
 
     async def _safe_tavily() -> list[dict] | None:
         try:
@@ -254,6 +423,10 @@ async def web_search(
                 "Search completed, but the upstream response did not contain a "
                 "parsable answer body. Call get_sources to inspect the sources."
             )
+        else:
+            answer = (
+                "Search completed, but the upstream response was empty after retries."
+            )
 
     await _SOURCES_CACHE.set(session_id, all_sources)
     return {
@@ -266,7 +439,8 @@ async def web_search(
 @mcp.tool(
     name="get_sources",
     description="""
-    When you feel confused or curious about the search response content, use the session_id returned by web_search to invoke the this tool to obtain the corresponding list of information sources.
+    Use the session_id returned by web_search to obtain the corresponding
+    cached source list.
     Retrieve all cached sources for a previous web_search call.
     Provide the session_id returned by web_search to get the full source list.
     """,
@@ -366,12 +540,16 @@ async def _call_tavily_search(query: str, max_results: int = 6) -> list[dict] | 
     name="web_fetch",
     output_schema=None,
     description="""
-    Fetches and extracts complete content from a URL, returning it as a structured Markdown document.
+    Fetches and extracts complete content from a URL,
+    returning it as a structured Markdown document.
 
     **Key Features:**
-        - **Full Content Extraction:** Retrieves and parses all meaningful content (text, images, links, tables, code blocks).
-        - **Markdown Conversion:** Converts HTML structure to well-formatted Markdown with preserved hierarchy.
-        - **Content Fidelity:** Maintains 100% content fidelity without summarization or modification.
+        - **Full Content Extraction:** Retrieves and parses meaningful
+          content such as text, images, links, tables, and code blocks.
+        - **Markdown Conversion:** Converts HTML structure to
+          well-formatted Markdown with preserved hierarchy.
+        - **Content Fidelity:** Maintains full content fidelity
+          without summarization or modification.
 
     **Edge Cases & Best Practices:**
         - Ensure URL is complete and accessible (not behind authentication or paywalls).
@@ -383,7 +561,10 @@ async def _call_tavily_search(query: str, max_results: int = 6) -> list[dict] | 
 async def web_fetch(
     url: Annotated[
         str,
-        "Valid HTTP/HTTPS web address pointing to the target page. Must be complete and accessible.",
+        (
+            "Valid HTTP or HTTPS web address pointing to the target page. "
+            "It must be complete and accessible."
+        ),
     ],
     ctx: Context | None = None,
 ) -> str:
@@ -409,8 +590,26 @@ async def _call_tavily_map(
     limit: int = 50,
     timeout: int = 150,
 ) -> str:
-    import httpx
     import json
+
+    import httpx
+
+    async def _post_map_request(
+        client: httpx.AsyncClient, request_body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Post a map request and return the decoded JSON payload.
+
+        Args:
+            client: The shared async HTTP client.
+            request_body: The JSON request body for the upstream map API.
+
+        Returns:
+            The decoded JSON response body.
+        """
+        response = await client.post(endpoint, headers=headers, json=request_body)
+        response.raise_for_status()
+        return response.json()
 
     api_url = config.tavily_api_url
     api_key = config.tavily_api_key
@@ -418,26 +617,75 @@ async def _call_tavily_map(
         return "Configuration error: TAVILY_API_KEY is not configured"
     endpoint = f"{api_url.rstrip('/')}/map"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {
-        "url": url,
-        "max_depth": max_depth,
-        "max_breadth": max_breadth,
-        "limit": limit,
-        "timeout": timeout,
-    }
-    if instructions:
-        body["instructions"] = instructions
+    body = _build_tavily_map_body(
+        url=url,
+        instructions=instructions,
+        max_depth=max_depth,
+        max_breadth=max_breadth,
+        limit=limit,
+        timeout=timeout,
+    )
     try:
         async with httpx.AsyncClient(timeout=float(timeout + 10)) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
+            try:
+                data = await _post_map_request(client, body)
+            except httpx.HTTPStatusError as exc:
+                if (
+                    exc.response.status_code != 400
+                    or "allow_external" not in exc.response.text
+                    and "select_domains" not in exc.response.text
+                ):
+                    raise
+                legacy_body = {
+                    key: value
+                    for key, value in body.items()
+                    if key not in {"allow_external", "select_domains"}
+                }
+                data = await _post_map_request(client, legacy_body)
+            raw_results = data.get("results", [])
+            results = (
+                _filter_same_site_results(url, raw_results)
+                if isinstance(raw_results, list)
+                else []
+            )
+            response_payload: dict[str, Any] = {
+                "base_url": data.get("base_url", ""),
+                "results": results,
+                "response_time": data.get("response_time", 0),
+            }
+            if isinstance(raw_results, list) and raw_results and not results:
+                response_payload["raw_count"] = len(raw_results)
+                response_payload["filtered_out_count"] = len(raw_results)
+            elif (
+                isinstance(raw_results, list)
+                and not raw_results
+                and "allow_external" in body
+                and "select_domains" in body
+            ):
+                legacy_body = {
+                    key: value
+                    for key, value in body.items()
+                    if key not in {"allow_external", "select_domains"}
+                }
+                try:
+                    legacy_data = await _post_map_request(client, legacy_body)
+                except httpx.HTTPStatusError:
+                    legacy_data = {}
+                legacy_results = legacy_data.get("results", [])
+                legacy_filtered = (
+                    _filter_same_site_results(url, legacy_results)
+                    if isinstance(legacy_results, list)
+                    else []
+                )
+                if (
+                    isinstance(legacy_results, list)
+                    and legacy_results
+                    and not legacy_filtered
+                ):
+                    response_payload["raw_count"] = len(legacy_results)
+                    response_payload["filtered_out_count"] = len(legacy_results)
             return json.dumps(
-                {
-                    "base_url": data.get("base_url", ""),
-                    "results": data.get("results", []),
-                    "response_time": data.get("response_time", 0),
-                },
+                response_payload,
                 ensure_ascii=False,
                 indent=2,
             )
@@ -452,17 +700,21 @@ async def _call_tavily_map(
 @mcp.tool(
     name="web_map",
     description="""
-    Maps a website's structure by traversing it like a graph, discovering URLs and generating a comprehensive site map.
+    Maps a website's structure by traversing it like a graph,
+    discovering URLs and generating a comprehensive site map.
 
     **Key Features:**
         - **Graph Traversal:** Explores website structure starting from root URL.
-        - **Depth & Breadth Control:** Configure traversal limits to balance coverage and performance.
-        - **Instruction Filtering:** Use natural language to focus crawler on specific content types.
+        - **Depth & Breadth Control:** Configures traversal limits to balance
+          coverage and performance.
+        - **Instruction Filtering:** Uses natural language to focus the
+          crawler on specific content types.
 
     **Edge Cases & Best Practices:**
-        - Start with low max_depth (1-2) for initial exploration, increase if needed.
-        - Use instructions to filter for specific content (e.g., "only documentation pages").
-        - Large sites may hit timeout limits; adjust timeout and limit parameters accordingly.
+        - Start with low max_depth (1-2) for initial exploration.
+        - Use instructions to filter for specific content.
+        - Large sites may hit timeout limits, so adjust timeout and limit
+          parameters accordingly.
     """,
     meta={"version": "1.3.0", "author": "guda.studio"},
 )
@@ -472,7 +724,10 @@ async def web_map(
     ],
     instructions: Annotated[
         str,
-        "Natural language instructions for the crawler to filter or focus on specific content.",
+        (
+            "Natural language instructions for the crawler to filter or focus "
+            "on specific content."
+        ),
     ] = "",
     max_depth: Annotated[
         int,
@@ -521,8 +776,9 @@ async def web_map(
 )
 async def get_config_info() -> str:
     import json
-    import httpx
     import time
+
+    import httpx
 
     config_info = config.get_config_info()
 
@@ -555,7 +811,8 @@ async def get_config_info() -> str:
     except httpx.TimeoutException:
         test_result["status"] = "timeout"
         test_result["message"] = (
-            "The request timed out after 10 seconds. Check network access or the API URL."
+            "The request timed out after 10 seconds. "
+            "Check network access or the API URL."
         )
     except httpx.RequestError as e:
         test_result["status"] = "request_error"
@@ -576,11 +833,13 @@ async def get_config_info() -> str:
     name="switch_model",
     output_schema=None,
     description="""
-    Switches the default Grok model used for search and fetch operations, persisting the setting.
+    Switches the default Grok model used for search and fetch operations,
+    persisting the setting.
 
     **Key Features:**
         - **Model Selection:** Change the AI model for web search and content fetching.
-        - **Persistent Storage:** Model preference saved to ~/.config/grok-search/config.json.
+        - **Persistent Storage:** Model preference saved to
+          ~/.config/grok-search/config.json.
         - **Immediate Effect:** New model used for all subsequent operations.
 
     **Edge Cases & Best Practices:**
@@ -593,7 +852,10 @@ async def get_config_info() -> str:
 async def switch_model(
     model: Annotated[
         str,
-        "Model ID to switch to (e.g., 'grok-4-fast', 'grok-2-latest', 'grok-vision-beta').",
+        (
+            "Model ID to switch to (for example, 'grok-4-fast', "
+            "'grok-2-latest', or 'grok-vision-beta')."
+        ),
     ],
 ) -> str:
     import json
@@ -639,7 +901,10 @@ async def describe_url(
     ],
     model: Annotated[
         str,
-        "Optional model ID for this request only. This value is used ONLY when user explicitly provided.",
+        (
+            "Optional model ID for this request only. This value is used only "
+            "when the user explicitly provided it."
+        ),
     ] = "",
     ctx: Context | None = None,
 ) -> dict:
@@ -674,7 +939,10 @@ async def rank_sources(
     query: Annotated[str, "The user query to rank sources against."],
     sources_text: Annotated[
         str,
-        "A numbered source list in plain text or Markdown. Every source number must appear exactly once.",
+        (
+            "A numbered source list in plain text or Markdown. "
+            "Every source number must appear exactly once."
+        ),
     ],
     total: Annotated[
         int,
@@ -682,7 +950,10 @@ async def rank_sources(
     ],
     model: Annotated[
         str,
-        "Optional model ID for this request only. This value is used ONLY when user explicitly provided.",
+        (
+            "Optional model ID for this request only. This value is used only "
+            "when the user explicitly provided it."
+        ),
     ] = "",
     ctx: Context | None = None,
 ) -> dict:
@@ -709,11 +980,14 @@ async def rank_sources(
     name="plan_intent",
     output_schema=None,
     description="""
-    Phase 1 of search planning: Analyze user intent. Call this FIRST to create a session.
+    Phase 1 of search planning: Analyze user intent.
+    Call this FIRST to create a session.
     Returns session_id for subsequent phases. Required flow:
-    plan_intent → plan_complexity → plan_sub_query(×N) → plan_search_term(×N) → plan_tool_mapping(×N) → plan_execution
+    plan_intent → plan_complexity → plan_sub_query(×N) →
+    plan_search_term(×N) → plan_tool_mapping(×N) → plan_execution
 
-    Required phases depend on complexity: Level 1 = phases 1-3; Level 2 = phases 1-5; Level 3 = all 6.
+    Required phases depend on complexity:
+    Level 1 = phases 1-3; Level 2 = phases 1-5; Level 3 = all 6.
     """,
 )
 async def plan_intent(
@@ -725,7 +999,7 @@ async def plan_intent(
     confidence: Annotated[float, "Confidence 0.0-1.0"] = 1.0,
     domain: Annotated[str, "Specific domain if identifiable"] = "",
     premise_valid: Annotated[
-        Optional[bool], "False if the question contains a flawed assumption"
+        bool | None, "False if the question contains a flawed assumption"
     ] = None,
     ambiguities: Annotated[str, "Comma-separated unresolved ambiguities"] = "",
     unverified_terms: Annotated[str, "Comma-separated external terms to verify"] = "",
@@ -763,7 +1037,10 @@ async def plan_intent(
 @mcp.tool(
     name="plan_complexity",
     output_schema=None,
-    description="Phase 2: Assess search complexity (1-3). Controls required phases: Level 1 = phases 1-3; Level 2 = phases 1-5; Level 3 = all 6.",
+    description=(
+        "Phase 2: Assess search complexity (1-3). "
+        "Controls required phases for levels 1, 2, and 3."
+    ),
 )
 async def plan_complexity(
     session_id: Annotated[str, "Session ID from plan_intent"],
@@ -803,7 +1080,10 @@ async def plan_complexity(
 @mcp.tool(
     name="plan_sub_query",
     output_schema=None,
-    description="Phase 3: Add one sub-query. Call once per sub-query; data accumulates across calls. Set is_revision=true to replace all.",
+    description=(
+        "Phase 3: Add one sub-query. Call once per sub-query; "
+        "data accumulates across calls."
+    ),
 )
 async def plan_sub_query(
     session_id: Annotated[str, "Session ID from plan_intent"],
@@ -850,7 +1130,10 @@ async def plan_sub_query(
 @mcp.tool(
     name="plan_search_term",
     output_schema=None,
-    description="Phase 4: Add one search term. Call once per term; data accumulates. First call must set approach.",
+    description=(
+        "Phase 4: Add one search term. Call once per term; "
+        "data accumulates and the first call must set approach."
+    ),
 )
 async def plan_search_term(
     session_id: Annotated[str, "Session ID from plan_intent"],
@@ -895,7 +1178,10 @@ async def plan_search_term(
 @mcp.tool(
     name="plan_tool_mapping",
     output_schema=None,
-    description="Phase 5: Map a sub-query to a tool. Call once per mapping; data accumulates.",
+    description=(
+        "Phase 5: Map a sub-query to a tool. "
+        "Call once per mapping and accumulate the results."
+    ),
 )
 async def plan_tool_mapping(
     session_id: Annotated[str, "Session ID from plan_intent"],
@@ -915,10 +1201,8 @@ async def plan_tool_mapping(
         )
     item = {"sub_query_id": sub_query_id, "tool": tool, "reason": reason}
     if params_json:
-        try:
+        with suppress(json.JSONDecodeError):
             item["params"] = json.loads(params_json)
-        except json.JSONDecodeError:
-            pass
     return json.dumps(
         planning_engine.process_phase(
             phase="tool_selection",
@@ -936,7 +1220,10 @@ async def plan_tool_mapping(
 @mcp.tool(
     name="plan_execution",
     output_schema=None,
-    description="Phase 6: Define execution order. parallel_groups: semicolon-separated groups of comma-separated IDs (e.g., 'sq1,sq2;sq3').",
+    description=(
+        "Phase 6: Define execution order. parallel_groups uses semicolon-"
+        "separated groups of comma-separated IDs."
+    ),
 )
 async def plan_execution(
     session_id: Annotated[str, "Session ID from plan_intent"],
@@ -980,8 +1267,8 @@ async def plan_execution(
 
 
 def main():
-    import signal
     import os
+    import signal
     import threading
 
     if threading.current_thread() is threading.main_thread():
@@ -994,8 +1281,8 @@ def main():
             signal.signal(signal.SIGTERM, handle_shutdown)
 
     if sys.platform == "win32":
-        import time
         import ctypes
+        import time
 
         parent_pid = os.getppid()
 
