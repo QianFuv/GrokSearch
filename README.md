@@ -151,8 +151,6 @@ claude mcp add-json grok-search --scope user '{
 | `TAVILY_API_KEY` | ❌ | `{GUDA_API_KEY}` | Tavily API 密钥（用于 web_fetch / web_map） |
 | `TAVILY_API_URL` | ❌ | `{GUDA_BASE_URL}/tavily` | Tavily API 地址 |
 | `TAVILY_ENABLED` | ❌ | `true` | 是否启用 Tavily |
-| `FIRECRAWL_API_KEY` | ❌ | `{GUDA_API_KEY}` | Firecrawl API 密钥（Tavily 失败时托底） |
-| `FIRECRAWL_API_URL` | ❌ | `{GUDA_BASE_URL}/firecrawl` | Firecrawl API 地址 |
 | `GROK_DEBUG` | ❌ | `false` | 调试模式 |
 | `GROK_LOG_LEVEL` | ❌ | `INFO` | 日志级别 |
 | `GROK_LOG_DIR` | ❌ | `logs` | 日志目录 |
@@ -160,7 +158,7 @@ claude mcp add-json grok-search --scope user '{
 | `GROK_RETRY_MULTIPLIER` | ❌ | `1` | 重试退避乘数 |
 | `GROK_RETRY_MAX_WAIT` | ❌ | `10` | 重试最大等待秒数 |
 
-> **注意**：配置了 `GUDA_API_KEY` 后，`GROK_API_URL`/`GROK_API_KEY`/`TAVILY_*`/`FIRECRAWL_*` 均为可选，系统自动从 `GUDA_BASE_URL` 派生。显式设置的独立变量优先级更高。
+> **注意**：配置了 `GUDA_API_KEY` 后，`GROK_API_URL`/`GROK_API_KEY`/`TAVILY_*` 均为可选，系统自动从 `GUDA_BASE_URL` 派生。显式设置的独立变量优先级更高。
 
 
 ### 验证安装
@@ -169,18 +167,11 @@ claude mcp add-json grok-search --scope user '{
 claude mcp list
 ```
 
-🍟 显示连接成功后，我们**十分推荐**在 Claude 对话中输入 
-```
-调用 grok-search toggle_builtin_tools，关闭Claude Code's built-in WebSearch and WebFetch tools
-```
-工具将自动修改**项目级** `.claude/settings.json` 的 `permissions.deny`，一键禁用 Claude Code 官方的 WebSearch 和 WebFetch，从而迫使claude code调用本项目实现搜索！
-
-
 
 ## 三、MCP 工具介绍
 
 <details>
-<summary>本项目提供八个 MCP 工具（展开查看）</summary>
+<summary>本项目提供九个 MCP 工具（展开查看）</summary>
 
 ### `web_search` — AI 网络搜索
 
@@ -193,7 +184,7 @@ claude mcp list
 | `query` | string | ✅ | - | 搜索查询语句 |
 | `platform` | string | ❌ | `""` | 聚焦平台（如 `"Twitter"`, `"GitHub, Reddit"`） |
 | `model` | string | ❌ | `null` | 按次指定 Grok 模型 ID |
-| `extra_sources` | int | ❌ | `0` | 额外补充信源数量（Tavily/Firecrawl，可为 0 关闭） |
+| `extra_sources` | int | ❌ | `0` | 额外补充信源数量（仅 Tavily，可为 0 关闭） |
 
 自动检测查询中的时间相关关键词（如"最新""今天""recent"等），注入本地时间上下文以提升时效性搜索的准确度。
 
@@ -217,7 +208,7 @@ claude mcp list
 
 ### `web_fetch` — 网页内容抓取
 
-通过 Tavily Extract API 获取完整网页内容，返回 Markdown 格式。Tavily 失败时自动降级到 Firecrawl Scrape 进行托底抓取。
+通过 Tavily Extract API 获取完整网页内容，返回 Markdown 格式。对临时失败和空内容响应会自动重试。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -246,15 +237,27 @@ claude mcp list
 |------|------|------|------|
 | `model` | string | ✅ | 模型 ID（如 `"grok-4-fast"`, `"grok-2-latest"`） |
 
-切换后配置持久化到 `~/.config/grok-search/config.json`，跨会话保持。
+切换前会先通过 `/models` 校验模型是否可用；切换后配置持久化到 `~/.config/grok-search/config.json`，跨会话保持。
 
-### `toggle_builtin_tools` — 工具路由控制
+### `describe_url` — 页面提要抽取
+
+让 Grok 阅读单个页面，返回页面标题和逐字摘录。
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `action` | string | ❌ | `"status"` | `"on"` 禁用官方工具 / `"off"` 启用官方工具 / `"status"` 查看状态 |
+| `url` | string | ✅ | - | 目标网页 URL |
+| `model` | string | ❌ | `""` | 按次指定 Grok 模型 ID |
 
-修改项目级 `.claude/settings.json` 的 `permissions.deny`，一键禁用 Claude Code 官方的 WebSearch 和 WebFetch。
+### `rank_sources` — 信源排序
+
+让 Grok 按与查询的相关度重排编号信源列表。
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `query` | string | ✅ | - | 用于排序的查询 |
+| `sources_text` | string | ✅ | - | 编号信源列表 |
+| `total` | int | ✅ | - | 信源总数 |
+| `model` | string | ❌ | `""` | 按次指定 Grok 模型 ID |
 
 ### `search_planning` — 搜索规划
 
@@ -267,7 +270,7 @@ claude mcp list
 <summary>
 Q: 必须同时配置 Grok 和 Tavily 吗？
 </summary>
-A: 配置 `GUDA_API_KEY` 即可获得完整的 Grok + Tavily + Firecrawl 服务。如不使用 GuDa，Grok（`GROK_API_URL` + `GROK_API_KEY`）为必填，提供核心搜索能力。Tavily 和 Firecrawl 均为可选：配置 Tavily 后 `web_fetch` 优先使用 Tavily Extract，失败时降级到 Firecrawl Scrape；两者均未配置时 `web_fetch` 将返回配置错误提示。`web_map` 依赖 Tavily。
+A: 配置 `GUDA_API_KEY` 即可获得完整的 Grok + Tavily 服务。如不使用 GuDa，Grok（`GROK_API_URL` + `GROK_API_KEY`）为必填，提供核心搜索能力。Tavily 为可选：未配置时 `web_fetch` 和 `web_map` 将返回配置错误提示。
 </details>
 
 <details>

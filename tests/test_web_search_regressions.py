@@ -57,7 +57,7 @@ async def test_web_search_surfaces_upstream_errors(monkeypatch):
 
     result = await server.web_search("What is the capital of France?")
 
-    assert result["content"] == "搜索上游异常: RuntimeError: boom"
+    assert result["content"] == "Search upstream error: RuntimeError: boom"
     assert result["sources_count"] == 0
 
 
@@ -98,6 +98,6 @@ async def test_web_search_reports_missing_body_when_only_sources_exist(monkeypat
 
     assert (
         result["content"]
-        == "搜索完成，但上游未返回可解析正文。可调用 get_sources 查看来源。"
+        == "Search completed, but the upstream response did not contain a parsable answer body. Call get_sources to inspect the sources."
     )
     assert result["sources_count"] == 1

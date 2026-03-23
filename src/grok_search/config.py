@@ -49,7 +49,7 @@ class Config:
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, ensure_ascii=False, indent=2)
         except IOError as e:
-            raise ValueError(f"无法保存配置文件: {str(e)}")
+            raise ValueError(f"Unable to save config file: {e}")
 
     @property
     def debug_enabled(self) -> bool:
@@ -82,8 +82,9 @@ class Config:
             if self.guda_api_key:
                 return f"{self.guda_base_url}/grok/v1"
             raise ValueError(
-                f"Grok API URL 未配置！\n"
-                f"请使用以下命令配置 MCP 服务器：\n{self._SETUP_COMMAND}"
+                "Grok API URL is not configured.\n"
+                "Configure the MCP server with:\n"
+                f"{self._SETUP_COMMAND}"
             )
         return url
 
@@ -92,8 +93,9 @@ class Config:
         key = os.getenv("GROK_API_KEY") or self.guda_api_key
         if not key:
             raise ValueError(
-                f"Grok API Key 未配置！\n"
-                f"请使用以下命令配置 MCP 服务器：\n{self._SETUP_COMMAND}"
+                "Grok API key is not configured.\n"
+                "Configure the MCP server with:\n"
+                f"{self._SETUP_COMMAND}"
             )
         return key
 
@@ -111,17 +113,6 @@ class Config:
     @property
     def tavily_api_key(self) -> str | None:
         return os.getenv("TAVILY_API_KEY") or self.guda_api_key
-
-    @property
-    def firecrawl_api_url(self) -> str:
-        url = os.getenv("FIRECRAWL_API_URL")
-        if not url and self.guda_api_key:
-            return f"{self.guda_base_url}/firecrawl"
-        return url or "https://api.firecrawl.dev/v2"
-
-    @property
-    def firecrawl_api_key(self) -> str | None:
-        return os.getenv("FIRECRAWL_API_KEY") or self.guda_api_key
 
     @property
     def log_level(self) -> str:
@@ -183,28 +174,28 @@ class Config:
 
     @staticmethod
     def _mask_api_key(key: str) -> str:
-        """脱敏显示 API Key，只显示前后各 4 个字符"""
+        """Mask an API key while keeping the first and last four characters."""
         if not key or len(key) <= 8:
             return "***"
         return f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
 
     def get_config_info(self) -> dict:
-        """获取配置信息（API Key 已脱敏）"""
+        """Return configuration information with masked credentials."""
         try:
             api_url = self.grok_api_url
             api_key_raw = self.grok_api_key
             api_key_masked = self._mask_api_key(api_key_raw)
-            config_status = "✅ 配置完整"
+            config_status = "configured"
         except ValueError as e:
-            api_url = "未配置"
-            api_key_masked = "未配置"
-            config_status = f"❌ 配置错误: {str(e)}"
+            api_url = "not configured"
+            api_key_masked = "not configured"
+            config_status = f"configuration error: {e}"
 
         info = {
             "GUDA_BASE_URL": self.guda_base_url,
             "GUDA_API_KEY": self._mask_api_key(self.guda_api_key)
             if self.guda_api_key
-            else "未配置",
+            else "not configured",
             "GROK_API_URL": api_url,
             "GROK_API_KEY": api_key_masked,
             "GROK_MODEL": self.grok_model,
@@ -215,11 +206,7 @@ class Config:
             "TAVILY_ENABLED": self.tavily_enabled,
             "TAVILY_API_KEY": self._mask_api_key(self.tavily_api_key)
             if self.tavily_api_key
-            else "未配置",
-            "FIRECRAWL_API_URL": self.firecrawl_api_url,
-            "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key)
-            if self.firecrawl_api_key
-            else "未配置",
+            else "not configured",
             "config_status": config_status,
         }
         return info

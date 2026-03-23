@@ -29,7 +29,8 @@ Claude --MCP--> Grok Search Server
 - **Dual Engine**: Grok search + Tavily extraction/mapping, complementary collaboration
 - **OpenAI-compatible interface**, supports any Grok mirror endpoint
 - **Automatic time injection** (detects time-related queries, injects local time context)
-- One-click disable Claude Code's built-in WebSearch/WebFetch, force routing to this tool
+- Tavily extraction retries transient failures and empty-content responses
+- `switch_model` validates the requested model against `/models` before persisting it
 - Smart retry (Retry-After header parsing + exponential backoff)
 - Parent process monitoring (auto-detects parent process exit on Windows, prevents zombie processes)
 
@@ -129,8 +130,6 @@ You can also configure additional environment variables in the `env` field:
 | `TAVILY_API_KEY` | No | `{GUDA_API_KEY}` | Tavily API key (for web_fetch / web_map) |
 | `TAVILY_API_URL` | No | `{GUDA_BASE_URL}/tavily` | Tavily API endpoint |
 | `TAVILY_ENABLED` | No | `true` | Enable Tavily |
-| `FIRECRAWL_API_KEY` | No | `{GUDA_API_KEY}` | Firecrawl API key (fallback when Tavily fails) |
-| `FIRECRAWL_API_URL` | No | `{GUDA_BASE_URL}/firecrawl` | Firecrawl API endpoint |
 | `GROK_DEBUG` | No | `false` | Debug mode |
 | `GROK_LOG_LEVEL` | No | `INFO` | Log level |
 | `GROK_LOG_DIR` | No | `logs` | Log directory |
@@ -138,7 +137,7 @@ You can also configure additional environment variables in the `env` field:
 | `GROK_RETRY_MULTIPLIER` | No | `1` | Retry backoff multiplier |
 | `GROK_RETRY_MAX_WAIT` | No | `10` | Max retry wait in seconds |
 
-> **Note**: When `GUDA_API_KEY` is set, all `GROK_API_URL`/`GROK_API_KEY`/`TAVILY_*`/`FIRECRAWL_*` variables become optional as they are auto-derived from `GUDA_BASE_URL`. Explicitly set variables take higher priority.
+> **Note**: When `GUDA_API_KEY` is set, `GROK_API_URL`/`GROK_API_KEY`/`TAVILY_*` become optional because they are auto-derived from `GUDA_BASE_URL`. Explicitly set variables take higher priority.
 
 
 ### Verify Installation
@@ -147,18 +146,11 @@ You can also configure additional environment variables in the `env` field:
 claude mcp list
 ```
 
-After confirming a successful connection, we **highly recommend** typing the following in a Claude conversation:
-```
-Call grok-search toggle_builtin_tools to disable Claude Code's built-in WebSearch and WebFetch tools
-```
-This will automatically modify the **project-level** `.claude/settings.json` `permissions.deny`, disabling Claude Code's built-in WebSearch and WebFetch, forcing Claude Code to use this project for searches!
-
-
 
 ## 3. MCP Tools
 
 <details>
-<summary>This project provides eight MCP tools (click to expand)</summary>
+<summary>This project provides nine MCP tools (click to expand)</summary>
 
 ### `web_search` — AI Web Search
 
@@ -171,7 +163,7 @@ Executes AI-driven web search via Grok API. By default it returns only Grok's an
 | `query` | string | Yes | - | Search query |
 | `platform` | string | No | `""` | Focus platform (e.g., `"Twitter"`, `"GitHub, Reddit"`) |
 | `model` | string | No | `null` | Per-request Grok model ID |
-| `extra_sources` | int | No | `0` | Extra sources via Tavily/Firecrawl (0 disables) |
+| `extra_sources` | int | No | `0` | Extra sources via Tavily (0 disables) |
 
 Automatically detects time-related keywords in queries (e.g., "latest", "today", "recent"), injecting local time context to improve accuracy for time-sensitive searches.
 
@@ -195,7 +187,7 @@ Return value (structured dict):
 
 ### `web_fetch` — Web Content Extraction
 
-Extracts complete web content via Tavily Extract API, returning Markdown format.
+Extracts complete web content via Tavily Extract API, returning Markdown format. Retries are applied for transient failures and empty responses.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -224,15 +216,27 @@ No parameters required. Displays all configuration status, tests Grok API connec
 |-----------|------|----------|-------------|
 | `model` | string | Yes | Model ID (e.g., `"grok-4-fast"`, `"grok-2-latest"`) |
 
-Settings persist to `~/.config/grok-search/config.json` across sessions.
+The requested model is validated against `/models` before it is saved. Settings persist to `~/.config/grok-search/config.json` across sessions.
 
-### `toggle_builtin_tools` — Tool Routing Control
+### `describe_url` — URL Description
+
+Asks Grok to read a single page and return a page title plus verbatim extracts.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `action` | string | No | `"status"` | `"on"` disable built-in tools / `"off"` enable built-in tools / `"status"` check status |
+| `url` | string | Yes | - | Target webpage URL |
+| `model` | string | No | `""` | Per-request Grok model ID |
 
-Modifies project-level `.claude/settings.json` `permissions.deny` to disable Claude Code's built-in WebSearch and WebFetch.
+### `rank_sources` — Source Ranking
+
+Asks Grok to reorder a numbered source list by relevance to a query.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | - | Query used for relevance ranking |
+| `sources_text` | string | Yes | - | Numbered source list |
+| `total` | int | Yes | - | Number of sources in the list |
+| `model` | string | No | `""` | Per-request Grok model ID |
 
 ### `search_planning` — Search Planning
 
@@ -245,7 +249,7 @@ A structured multi-phase planning scaffold to generate an executable search plan
 <summary>
 Q: Must I configure both Grok and Tavily?
 </summary>
-A: Set `GUDA_API_KEY` to get full Grok + Tavily + Firecrawl service. Without GuDa, Grok (`GROK_API_URL` + `GROK_API_KEY`) is required and provides the core search capability. Tavily is optional — without it, `web_fetch` and `web_map` will return configuration error messages.
+A: Set `GUDA_API_KEY` to get Grok + Tavily service. Without GuDa, Grok (`GROK_API_URL` + `GROK_API_KEY`) is required and provides the core search capability. Tavily is optional — without it, `web_fetch` and `web_map` will return configuration error messages.
 </details>
 
 <details>

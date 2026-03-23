@@ -1,17 +1,15 @@
 import asyncio
 import sys
 from pathlib import Path
-from typing import Annotated, Optional, cast
+from typing import Annotated, Optional
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
 
-# 支持直接运行：添加 src 目录到 Python 路径
 src_dir = Path(__file__).parent.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-# 尝试使用绝对导入（支持 mcp run）
 try:
     from grok_search.providers.grok import GrokSearchProvider
     from grok_search.logger import log_info
@@ -80,27 +78,69 @@ async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
     return models
 
 
-def _extra_results_to_sources(
-    tavily_results: list[dict] | None,
-    firecrawl_results: list[dict] | None,
-) -> list[dict]:
+def _apply_model_suffix(api_url: str, model: str) -> str:
+    if "openrouter" in api_url and ":online" not in model:
+        return f"{model}:online"
+    return model
+
+
+def _is_available_model(
+    api_url: str, requested_model: str, available_models: list[str]
+) -> bool:
+    return any(
+        candidate in available_models
+        for candidate in (
+            requested_model,
+            _apply_model_suffix(api_url, requested_model),
+        )
+    )
+
+
+async def _resolve_request_model(
+    api_url: str, api_key: str, requested_model: str
+) -> str:
+    if not requested_model:
+        return config.grok_model
+
+    available = await _get_available_models_cached(api_url, api_key)
+    if available and not _is_available_model(api_url, requested_model, available):
+        raise ValueError(f"Invalid model: {requested_model}")
+    return _apply_model_suffix(api_url, requested_model)
+
+
+async def _validate_model_selection(api_url: str, api_key: str, model: str) -> None:
+    try:
+        available = await _fetch_available_models(api_url, api_key)
+    except Exception as exc:
+        raise ValueError(
+            f"Unable to validate the model against /models: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if not available:
+        raise ValueError(
+            "Unable to validate the model because /models returned no data"
+        )
+
+    if not _is_available_model(api_url, model, available):
+        preview = ", ".join(available[:10])
+        suffix = ", ..." if len(available) > 10 else ""
+        raise ValueError(f"Invalid model: {model}. Available models: {preview}{suffix}")
+
+
+def _retry_delay_seconds(retry_index: int) -> float:
+    delay = config.retry_multiplier * (2 ** max(retry_index - 1, 0))
+    return min(float(config.retry_max_wait), max(0.0, delay))
+
+
+async def _sleep_before_retry(retry_index: int) -> None:
+    delay = _retry_delay_seconds(retry_index)
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+def _extra_results_to_sources(tavily_results: list[dict] | None) -> list[dict]:
     sources: list[dict] = []
     seen: set[str] = set()
-
-    if firecrawl_results:
-        for r in firecrawl_results:
-            url = (r.get("url") or "").strip()
-            if not url or url in seen:
-                continue
-            seen.add(url)
-            item: dict = {"url": url, "provider": "firecrawl"}
-            title = (r.get("title") or "").strip()
-            if title:
-                item["title"] = title
-            desc = (r.get("description") or "").strip()
-            if desc:
-                item["description"] = desc
-            sources.append(item)
 
     if tavily_results:
         for r in tavily_results:
@@ -146,7 +186,7 @@ async def web_search(
     ] = "",
     extra_sources: Annotated[
         int,
-        "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 0.",
+        "Number of additional reference results from Tavily. Set 0 to disable. Default 0.",
     ] = 0,
 ) -> dict:
     session_id = new_session_id()
@@ -157,39 +197,24 @@ async def web_search(
         await _SOURCES_CACHE.set(session_id, [])
         return {
             "session_id": session_id,
-            "content": f"配置错误: {str(e)}",
+            "content": f"Configuration error: {e}",
             "sources_count": 0,
         }
 
-    effective_model = config.grok_model
-    if model:
-        available = await _get_available_models_cached(api_url, api_key)
-        if available and model not in available:
-            await _SOURCES_CACHE.set(session_id, [])
-            return {
-                "session_id": session_id,
-                "content": f"无效模型: {model}",
-                "sources_count": 0,
-            }
-        effective_model = model
+    try:
+        effective_model = await _resolve_request_model(api_url, api_key, model)
+    except ValueError as e:
+        await _SOURCES_CACHE.set(session_id, [])
+        return {
+            "session_id": session_id,
+            "content": str(e),
+            "sources_count": 0,
+        }
 
     grok_provider = GrokSearchProvider(api_url, api_key, effective_model)
 
-    # 计算额外信源配额
-    has_tavily = bool(config.tavily_api_key)
-    has_firecrawl = bool(config.firecrawl_api_key)
-    firecrawl_count = 0
-    tavily_count = 0
-    if extra_sources > 0:
-        if has_firecrawl and has_tavily:
-            firecrawl_count = round(extra_sources * 1)
-            tavily_count = extra_sources - firecrawl_count
-        elif has_firecrawl:
-            firecrawl_count = extra_sources
-        elif has_tavily:
-            tavily_count = extra_sources
+    tavily_count = extra_sources if extra_sources > 0 and config.tavily_api_key else 0
 
-    # 并行执行搜索任务
     async def _safe_grok() -> str:
         return await grok_provider.search(query, platform)
 
@@ -201,19 +226,9 @@ async def web_search(
             return None
         return None
 
-    async def _safe_firecrawl() -> list[dict] | None:
-        try:
-            if firecrawl_count:
-                return await _call_firecrawl_search(query, firecrawl_count)
-        except Exception:
-            return None
-        return None
-
     coros: list = [_safe_grok()]
     if tavily_count > 0:
         coros.append(_safe_tavily())
-    if firecrawl_count > 0:
-        coros.append(_safe_firecrawl())
 
     gathered = list(await asyncio.gather(*coros, return_exceptions=True))
 
@@ -223,31 +238,22 @@ async def web_search(
     )
     grok_result = grok_first if isinstance(grok_first, str) else ""
     tavily_results: list[dict] | None = None
-    firecrawl_results: list[dict] | None = None
-    idx = 1
     if tavily_count > 0:
-        tavily_value = gathered[idx]
-        tavily_results = (
-            cast(list[dict], tavily_value) if isinstance(tavily_value, list) else None
-        )
-        idx += 1
-    if firecrawl_count > 0:
-        firecrawl_value = gathered[idx]
-        firecrawl_results = (
-            cast(list[dict], firecrawl_value)
-            if isinstance(firecrawl_value, list)
-            else None
-        )
+        tavily_value = gathered[1]
+        tavily_results = tavily_value if isinstance(tavily_value, list) else None
 
     answer, grok_sources = split_answer_and_sources(grok_result)
-    extra = _extra_results_to_sources(tavily_results, firecrawl_results)
+    extra = _extra_results_to_sources(tavily_results)
     all_sources = merge_sources(grok_sources, extra)
 
     if not answer:
         if grok_error is not None:
-            answer = f"搜索上游异常: {type(grok_error).__name__}: {grok_error}"
+            answer = f"Search upstream error: {type(grok_error).__name__}: {grok_error}"
         elif all_sources:
-            answer = "搜索完成，但上游未返回可解析正文。可调用 get_sources 查看来源。"
+            answer = (
+                "Search completed, but the upstream response did not contain a "
+                "parsable answer body. Call get_sources to inspect the sources."
+            )
 
     await _SOURCES_CACHE.set(session_id, all_sources)
     return {
@@ -290,17 +296,26 @@ async def _call_tavily_extract(url: str) -> str | None:
     endpoint = f"{api_url.rstrip('/')}/extract"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {"urls": [url], "format": "markdown"}
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            if data.get("results") and len(data["results"]) > 0:
-                content = data["results"][0].get("raw_content", "")
-                return content if content and content.strip() else None
-            return None
-    except Exception:
-        return None
+    max_attempts = max(1, config.retry_max_attempts)
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await client.post(endpoint, headers=headers, json=body)
+                response.raise_for_status()
+                data = response.json()
+                results = data.get("results") or []
+                if results:
+                    content = results[0].get("raw_content", "")
+                    if content and content.strip():
+                        return content
+            except Exception:
+                pass
+
+            if attempt < max_attempts:
+                await _sleep_before_retry(attempt)
+
+    return None
 
 
 async def _call_tavily_search(query: str, max_results: int = 6) -> list[dict] | None:
@@ -318,93 +333,32 @@ async def _call_tavily_search(query: str, max_results: int = 6) -> list[dict] | 
         "include_raw_content": False,
         "include_answer": False,
     }
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            results = data.get("results", [])
-            return (
-                [
-                    {
-                        "title": r.get("title", ""),
-                        "url": r.get("url", ""),
-                        "content": r.get("content", ""),
-                        "score": r.get("score", 0),
-                    }
-                    for r in results
-                ]
-                if results
-                else None
-            )
-    except Exception:
-        return None
+    max_attempts = max(1, config.retry_max_attempts)
 
-
-async def _call_firecrawl_search(query: str, limit: int = 14) -> list[dict] | None:
-    import httpx
-
-    api_key = config.firecrawl_api_key
-    if not api_key:
-        return None
-    endpoint = f"{config.firecrawl_api_url.rstrip('/')}/search"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {"query": query, "limit": limit}
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            results = data.get("data", {}).get("web", [])
-            return (
-                [
-                    {
-                        "title": r.get("title", ""),
-                        "url": r.get("url", ""),
-                        "description": r.get("description", ""),
-                    }
-                    for r in results
-                ]
-                if results
-                else None
-            )
-    except Exception:
-        return None
-
-
-async def _call_firecrawl_scrape(url: str, ctx=None) -> str | None:
-    import httpx
-
-    api_url = config.firecrawl_api_url
-    api_key = config.firecrawl_api_key
-    if not api_key:
-        return None
-    endpoint = f"{api_url.rstrip('/')}/scrape"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    max_retries = config.retry_max_attempts
-    for attempt in range(max_retries):
-        body = {
-            "url": url,
-            "formats": ["markdown"],
-            "timeout": 60000,
-            "waitFor": (attempt + 1) * 1500,
-        }
-        try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        for attempt in range(1, max_attempts + 1):
+            try:
                 response = await client.post(endpoint, headers=headers, json=body)
                 response.raise_for_status()
                 data = response.json()
-                markdown = data.get("data", {}).get("markdown", "")
-                if markdown and markdown.strip():
-                    return markdown
-                await log_info(
-                    ctx,
-                    f"Firecrawl: markdown为空, 重试 {attempt + 1}/{max_retries}",
-                    config.debug_enabled,
+                results = data.get("results", [])
+                return (
+                    [
+                        {
+                            "title": r.get("title", ""),
+                            "url": r.get("url", ""),
+                            "content": r.get("content", ""),
+                            "score": r.get("score", 0),
+                        }
+                        for r in results
+                    ]
+                    if results
+                    else None
                 )
-        except Exception as e:
-            await log_info(ctx, f"Firecrawl error: {e}", config.debug_enabled)
-            return None
+            except Exception:
+                if attempt >= max_attempts:
+                    break
+                await _sleep_before_retry(attempt)
     return None
 
 
@@ -435,23 +389,16 @@ async def web_fetch(
 ) -> str:
     await log_info(ctx, f"Begin Fetch: {url}", config.debug_enabled)
 
+    if not config.tavily_api_key:
+        return "Configuration error: TAVILY_API_KEY is not configured"
+
     result = await _call_tavily_extract(url)
     if result:
         await log_info(ctx, "Fetch Finished (Tavily)!", config.debug_enabled)
         return result
 
-    await log_info(
-        ctx, "Tavily unavailable or failed, trying Firecrawl...", config.debug_enabled
-    )
-    result = await _call_firecrawl_scrape(url, ctx)
-    if result:
-        await log_info(ctx, "Fetch Finished (Firecrawl)!", config.debug_enabled)
-        return result
-
     await log_info(ctx, "Fetch Failed!", config.debug_enabled)
-    if not config.tavily_api_key and not config.firecrawl_api_key:
-        return "配置错误: TAVILY_API_KEY 和 FIRECRAWL_API_KEY 均未配置"
-    return "提取失败: 所有提取服务均未能获取内容"
+    return "Extraction failed: Tavily did not return content after retries"
 
 
 async def _call_tavily_map(
@@ -468,7 +415,7 @@ async def _call_tavily_map(
     api_url = config.tavily_api_url
     api_key = config.tavily_api_key
     if not api_key:
-        return "配置错误: TAVILY_API_KEY 未配置，请设置环境变量 TAVILY_API_KEY"
+        return "Configuration error: TAVILY_API_KEY is not configured"
     endpoint = f"{api_url.rstrip('/')}/map"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {
@@ -495,11 +442,11 @@ async def _call_tavily_map(
                 indent=2,
             )
     except httpx.TimeoutException:
-        return f"映射超时: 请求超过{timeout}秒"
+        return f"Map timeout: the request exceeded {timeout} seconds"
     except httpx.HTTPStatusError as e:
-        return f"HTTP错误: {e.response.status_code} - {e.response.text[:200]}"
+        return f"HTTP error: {e.response.status_code} - {e.response.text[:200]}"
     except Exception as e:
-        return f"映射错误: {str(e)}"
+        return f"Map error: {e}"
 
 
 @mcp.tool(
@@ -575,12 +522,12 @@ async def web_map(
 async def get_config_info() -> str:
     import json
     import httpx
+    import time
 
     config_info = config.get_config_info()
 
-    # 添加连接测试
     test_result: dict[str, object] = {
-        "status": "未测试",
+        "status": "not_tested",
         "message": "",
         "response_time_ms": 0,
     }
@@ -589,69 +536,36 @@ async def get_config_info() -> str:
         api_url = config.grok_api_url
         api_key = config.grok_api_key
 
-        # 构建 /models 端点 URL
-        models_url = f"{api_url.rstrip('/')}/models"
-
-        # 发送测试请求
-        import time
-
         start_time = time.time()
+        model_names = await _fetch_available_models(api_url, api_key)
+        response_time = (time.time() - start_time) * 1000
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                models_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+        test_result["status"] = "connected"
+        test_result["response_time_ms"] = round(response_time, 2)
+        if model_names:
+            test_result["message"] = (
+                f"Fetched model list successfully; {len(model_names)} models available"
+            )
+            test_result["available_models"] = model_names
+        else:
+            test_result["message"] = (
+                "Fetched model list successfully, but the API returned no models"
             )
 
-            response_time = (time.time() - start_time) * 1000  # 转换为毫秒
-
-            if response.status_code == 200:
-                test_result["status"] = "✅ 连接成功"
-                test_result["message"] = (
-                    f"成功获取模型列表 (HTTP {response.status_code})"
-                )
-                test_result["response_time_ms"] = round(response_time, 2)
-
-                # 尝试解析返回的模型列表
-                try:
-                    models_data = response.json()
-                    if "data" in models_data and isinstance(models_data["data"], list):
-                        model_count = len(models_data["data"])
-                        message = cast(str, test_result["message"])
-                        test_result["message"] = f"{message}，共 {model_count} 个模型"
-
-                        # 提取所有模型的 ID/名称
-                        model_names = []
-                        for model in models_data["data"]:
-                            if isinstance(model, dict) and "id" in model:
-                                model_names.append(model["id"])
-
-                        if model_names:
-                            test_result["available_models"] = model_names
-                except Exception:
-                    pass
-            else:
-                test_result["status"] = "⚠️ 连接异常"
-                test_result["message"] = (
-                    f"HTTP {response.status_code}: {response.text[:100]}"
-                )
-                test_result["response_time_ms"] = round(response_time, 2)
-
     except httpx.TimeoutException:
-        test_result["status"] = "❌ 连接超时"
-        test_result["message"] = "请求超时（10秒），请检查网络连接或 API URL"
+        test_result["status"] = "timeout"
+        test_result["message"] = (
+            "The request timed out after 10 seconds. Check network access or the API URL."
+        )
     except httpx.RequestError as e:
-        test_result["status"] = "❌ 连接失败"
-        test_result["message"] = f"网络错误: {str(e)}"
+        test_result["status"] = "request_error"
+        test_result["message"] = f"Network error: {e}"
     except ValueError as e:
-        test_result["status"] = "❌ 配置错误"
+        test_result["status"] = "configuration_error"
         test_result["message"] = str(e)
     except Exception as e:
-        test_result["status"] = "❌ 测试失败"
-        test_result["message"] = f"未知错误: {str(e)}"
+        test_result["status"] = "failed"
+        test_result["message"] = f"Unexpected error: {e}"
 
     config_info["connection_test"] = test_result
 
@@ -685,102 +599,110 @@ async def switch_model(
     import json
 
     try:
+        api_url = config.grok_api_url
+        api_key = config.grok_api_key
         previous_model = config.grok_model
+        await _validate_model_selection(api_url, api_key, model)
         config.set_model(model)
         current_model = config.grok_model
 
         result = {
-            "status": "✅ 成功",
+            "status": "success",
             "previous_model": previous_model,
             "current_model": current_model,
-            "message": f"模型已从 {previous_model} 切换到 {current_model}",
+            "message": f"Switched the model from {previous_model} to {current_model}",
             "config_file": str(config.config_file),
         }
 
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     except ValueError as e:
-        result = {"status": "❌ 失败", "message": f"切换模型失败: {str(e)}"}
+        result = {"status": "failed", "message": f"Failed to switch models: {e}"}
         return json.dumps(result, ensure_ascii=False, indent=2)
     except Exception as e:
-        result = {"status": "❌ 失败", "message": f"未知错误: {str(e)}"}
+        result = {"status": "failed", "message": f"Unexpected error: {e}"}
         return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool(
-    name="toggle_builtin_tools",
+    name="describe_url",
     output_schema=None,
     description="""
-    Toggle Claude Code's built-in WebSearch and WebFetch tools on/off.
-
-    **Key Features:**
-        - **Tool Control:** Enable or disable Claude Code's native web tools.
-        - **Project Scope:** Changes apply to current project's .claude/settings.json.
-        - **Status Check:** Query current state without making changes.
-
-    **Edge Cases & Best Practices:**
-        - Use "on" to block built-in tools when preferring this MCP server's implementation.
-        - Use "off" to restore Claude Code's native tools.
-        - Use "status" to check current configuration without modification.
+    Ask Grok to read a single page and return a title plus verbatim extracts.
     """,
     meta={"version": "1.3.0", "author": "guda.studio"},
 )
-async def toggle_builtin_tools(
-    action: Annotated[
+async def describe_url(
+    url: Annotated[
         str,
-        "Action to perform: 'on' (block built-in), 'off' (allow built-in), or 'status' (check current state).",
-    ] = "status",
-) -> str:
-    import json
+        "Valid HTTP/HTTPS web address pointing to the target page.",
+    ],
+    model: Annotated[
+        str,
+        "Optional model ID for this request only. This value is used ONLY when user explicitly provided.",
+    ] = "",
+    ctx: Context | None = None,
+) -> dict:
+    try:
+        api_url = config.grok_api_url
+        api_key = config.grok_api_key
+        effective_model = await _resolve_request_model(api_url, api_key, model)
+    except ValueError as e:
+        return {"url": url, "title": url, "extracts": "", "error": str(e)}
 
-    # Locate project root
-    root = Path.cwd()
-    while root != root.parent and not (root / ".git").exists():
-        root = root.parent
+    provider = GrokSearchProvider(api_url, api_key, effective_model)
+    try:
+        return await provider.describe_url(url, ctx)
+    except Exception as e:
+        return {
+            "url": url,
+            "title": url,
+            "extracts": "",
+            "error": f"Describe URL failed: {type(e).__name__}: {e}",
+        }
 
-    settings_path = root / ".claude" / "settings.json"
-    tools = ["WebFetch", "WebSearch"]
 
-    # Load or initialize
-    if settings_path.exists():
-        with open(settings_path, "r", encoding="utf-8") as f:
-            settings = json.load(f)
-    else:
-        settings = {"permissions": {"deny": []}}
+@mcp.tool(
+    name="rank_sources",
+    output_schema=None,
+    description="""
+    Ask Grok to reorder a numbered source list by relevance to a query.
+    """,
+    meta={"version": "1.3.0", "author": "guda.studio"},
+)
+async def rank_sources(
+    query: Annotated[str, "The user query to rank sources against."],
+    sources_text: Annotated[
+        str,
+        "A numbered source list in plain text or Markdown. Every source number must appear exactly once.",
+    ],
+    total: Annotated[
+        int,
+        Field(description="The number of sources in the list.", ge=1),
+    ],
+    model: Annotated[
+        str,
+        "Optional model ID for this request only. This value is used ONLY when user explicitly provided.",
+    ] = "",
+    ctx: Context | None = None,
+) -> dict:
+    try:
+        api_url = config.grok_api_url
+        api_key = config.grok_api_key
+        effective_model = await _resolve_request_model(api_url, api_key, model)
+    except ValueError as e:
+        return {"query": query, "order": [], "error": str(e)}
 
-    deny = settings.setdefault("permissions", {}).setdefault("deny", [])
-    blocked = all(t in deny for t in tools)
-
-    # Execute action
-    if action in ["on", "enable"]:
-        for t in tools:
-            if t not in deny:
-                deny.append(t)
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
-        msg = "官方工具已禁用"
-        blocked = True
-    elif action in ["off", "disable"]:
-        deny[:] = [t for t in deny if t not in tools]
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
-        msg = "官方工具已启用"
-        blocked = False
-    else:
-        msg = f"官方工具当前{'已禁用' if blocked else '已启用'}"
-
-    return json.dumps(
-        {
-            "blocked": blocked,
-            "deny_list": deny,
-            "file": str(settings_path),
-            "message": msg,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
+    provider = GrokSearchProvider(api_url, api_key, effective_model)
+    try:
+        order = await provider.rank_sources(query, sources_text, total, ctx)
+    except Exception as e:
+        return {
+            "query": query,
+            "order": [],
+            "error": f"Rank sources failed: {type(e).__name__}: {e}",
+        }
+    return {"query": query, "order": order, "total": total}
 
 
 @mcp.tool(
@@ -1062,7 +984,6 @@ def main():
     import os
     import threading
 
-    # 信号处理（仅主线程）
     if threading.current_thread() is threading.main_thread():
 
         def handle_shutdown(signum, frame):
@@ -1072,7 +993,6 @@ def main():
         if sys.platform != "win32":
             signal.signal(signal.SIGTERM, handle_shutdown)
 
-    # Windows 父进程监控
     if sys.platform == "win32":
         import time
         import ctypes
@@ -1080,7 +1000,7 @@ def main():
         parent_pid = os.getppid()
 
         def is_parent_alive(pid):
-            """Windows 下检查进程是否存活"""
+            """Check whether the parent process is still alive on Windows."""
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             STILL_ACTIVE = 259
             kernel32 = ctypes.windll.kernel32
