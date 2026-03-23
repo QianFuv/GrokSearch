@@ -1,5 +1,5 @@
-import os
 import json
+import os
 from pathlib import Path
 
 
@@ -39,17 +39,17 @@ class Config:
         if not self.config_file.exists():
             return {}
         try:
-            with open(self.config_file, "r", encoding="utf-8") as f:
+            with open(self.config_file, encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             return {}
 
     def _save_config_file(self, config_data: dict) -> None:
         try:
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, ensure_ascii=False, indent=2)
-        except IOError as e:
-            raise ValueError(f"Unable to save config file: {e}")
+        except OSError as e:
+            raise ValueError(f"Unable to save config file: {e}") from e
 
     @property
     def debug_enabled(self) -> bool:

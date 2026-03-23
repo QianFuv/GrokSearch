@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import Dict
 
 
 class SearchResult:
@@ -17,7 +16,7 @@ class SearchResult:
         self.source = source
         self.published_date = published_date
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> dict[str, str]:
         return {
             "title": self.title,
             "url": self.url,

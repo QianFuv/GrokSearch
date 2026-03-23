@@ -1,5 +1,5 @@
 import uuid
-from typing import Literal, Optional, cast
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -7,32 +7,43 @@ from pydantic import BaseModel, Field
 class IntentOutput(BaseModel):
     core_question: str = Field(description="Distilled core question in one sentence")
     query_type: Literal["factual", "comparative", "exploratory", "analytical"] = Field(
-        description="factual=single answer, comparative=A vs B, exploratory=broad understanding, analytical=deep reasoning"
+        description=(
+            "factual=single answer, comparative=A vs B, "
+            "exploratory=broad understanding, analytical=deep reasoning"
+        )
     )
     time_sensitivity: Literal["realtime", "recent", "historical", "irrelevant"] = Field(
-        description="realtime=today, recent=days/weeks, historical=months+, irrelevant=timeless"
+        description=(
+            "realtime=today, recent=days/weeks, historical=months+, irrelevant=timeless"
+        )
     )
-    domain: Optional[str] = Field(
+    domain: str | None = Field(
         default=None, description="Specific domain if identifiable"
     )
-    premise_valid: Optional[bool] = Field(
+    premise_valid: bool | None = Field(
         default=None, description="False if the question contains a flawed assumption"
     )
-    ambiguities: Optional[list[str]] = Field(
+    ambiguities: list[str] | None = Field(
         default=None,
         description="Unresolved ambiguities that may affect search direction",
     )
-    unverified_terms: Optional[list[str]] = Field(
+    unverified_terms: list[str] | None = Field(
         default=None,
-        description="External classifications, rankings, or taxonomies that may be incomplete or outdated "
-        "in training data (e.g., 'CCF-A', 'Fortune 500', 'OWASP Top 10'). "
-        "Each should become a prerequisite sub-query in Phase 3.",
+        description=(
+            "External classifications, rankings, or taxonomies that may be "
+            "incomplete or outdated in training data. Examples include "
+            "'CCF-A', 'Fortune 500', and 'OWASP Top 10'. Each should become "
+            "a prerequisite sub-query in Phase 3."
+        ),
     )
 
 
 class ComplexityOutput(BaseModel):
     level: Literal[1, 2, 3] = Field(
-        description="1=simple (1-2 searches), 2=moderate (3-5 searches), 3=complex (6+ searches)"
+        description=(
+            "1=simple (1-2 searches), 2=moderate (3-5 searches), "
+            "3=complex (6+ searches)"
+        )
     )
     estimated_sub_queries: int = Field(ge=1, le=20)
     estimated_tool_calls: int = Field(ge=1, le=50)
@@ -43,36 +54,51 @@ class SubQuery(BaseModel):
     id: str = Field(description="Unique identifier (e.g., 'sq1')")
     goal: str
     expected_output: str = Field(description="What a successful result looks like")
-    tool_hint: Optional[str] = Field(
+    tool_hint: str | None = Field(
         default=None, description="Suggested tool: web_search | web_fetch | web_map"
     )
     boundary: str = Field(
-        description="What this sub-query explicitly excludes — MUST state mutual exclusion with sibling sub-queries, not just the broader domain"
+        description=(
+            "What this sub-query explicitly excludes. It must state mutual "
+            "exclusion with sibling sub-queries, not just the broader domain."
+        )
     )
-    depends_on: Optional[list[str]] = Field(
+    depends_on: list[str] | None = Field(
         default=None, description="IDs of prerequisite sub-queries"
     )
 
 
 class SearchTerm(BaseModel):
     term: str = Field(
-        description="Search query string. MUST be ≤8 words. Drop redundant synonyms (e.g., use 'RAG' not 'RAG retrieval augmented generation')."
+        description=(
+            "Search query string. MUST be <=8 words. Drop redundant synonyms "
+            "(for example, use 'RAG' instead of a fully expanded phrase)."
+        )
     )
     purpose: str = Field(
-        description="Single sub-query ID this term serves (e.g., 'sq2'). ONE term per sub-query — do NOT combine like 'sq1+sq2'."
+        description=(
+            "Single sub-query ID this term serves (for example, 'sq2'). "
+            "Use one term per sub-query and do not combine IDs."
+        )
     )
     round: int = Field(
         ge=1,
-        description="Execution round: 1=broad discovery, 2+=targeted follow-up refined by round 1 findings",
+        description=(
+            "Execution round: 1=broad discovery, 2+=targeted follow-up "
+            "refined by round 1 findings"
+        ),
     )
 
 
 class StrategyOutput(BaseModel):
     approach: Literal["broad_first", "narrow_first", "targeted"] = Field(
-        description="broad_first=wide then narrow, narrow_first=precise then expand, targeted=known-item"
+        description=(
+            "broad_first=wide then narrow, narrow_first=precise then expand, "
+            "targeted=known-item"
+        )
     )
     search_terms: list[SearchTerm]
-    fallback_plan: Optional[str] = Field(
+    fallback_plan: str | None = Field(
         default=None, description="Fallback if primary searches fail"
     )
 
@@ -81,7 +107,7 @@ class ToolPlanItem(BaseModel):
     sub_query_id: str
     tool: Literal["web_search", "web_fetch", "web_map"]
     reason: str
-    params: Optional[dict] = Field(default=None, description="Tool-specific parameters")
+    params: dict | None = Field(default=None, description="Tool-specific parameters")
 
 
 class ExecutionOrderOutput(BaseModel):
