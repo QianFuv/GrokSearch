@@ -1,5 +1,8 @@
+"""Logging helpers shared by the MCP tools."""
+
 import logging
 from datetime import datetime
+from typing import Any
 
 from .config import config
 
@@ -23,7 +26,18 @@ except OSError:
     logger.addHandler(logging.NullHandler())
 
 
-async def log_info(ctx, message: str, is_debug: bool = False):
+async def log_info(ctx: Any, message: str, is_debug: bool = False) -> None:
+    """
+    Send a log message to both the Python logger and the MCP context.
+
+    Args:
+        ctx: Optional MCP request context that can receive info messages.
+        message: The message to log.
+        is_debug: Whether the message should also be emitted to the local logger.
+
+    Returns:
+        None.
+    """
     if is_debug:
         logger.info(message)
 

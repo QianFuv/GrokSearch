@@ -118,16 +118,18 @@ def _extract_text_from_payload(payload: dict[str, Any]) -> str:
 
 
 def get_local_time_info() -> str:
-    """获取本地时间信息，用于注入到搜索查询中"""
+    """
+    Build local time context for time-sensitive search queries.
+
+    Returns:
+        A formatted time context block for prompt injection.
+    """
     try:
-        # 尝试获取系统本地时区
         local_tz = datetime.now().astimezone().tzinfo
         local_now = datetime.now(local_tz)
     except Exception:
-        # 降级使用 UTC
         local_now = datetime.now(UTC)
 
-    # 格式化时间信息
     weekdays_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday = weekdays_cn[local_now.weekday()]
 
@@ -140,8 +142,15 @@ def get_local_time_info() -> str:
 
 
 def _needs_time_context(query: str) -> bool:
-    """检查查询是否需要时间上下文"""
-    # 中文时间相关关键词
+    """
+    Check whether a query likely depends on current time context.
+
+    Args:
+        query: The user search query.
+
+    Returns:
+        True when time context should be injected into the prompt.
+    """
     cn_keywords = [
         "当前",
         "现在",
@@ -168,7 +177,6 @@ def _needs_time_context(query: str) -> bool:
         "即时",
         "目前",
     ]
-    # 英文时间相关关键词
     en_keywords = [
         "current",
         "now",
@@ -206,7 +214,15 @@ RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 def _is_retryable_exception(exc) -> bool:
-    """检查异常是否可重试"""
+    """
+    Check whether an upstream exception should trigger a retry.
+
+    Args:
+        exc: The exception raised by the HTTP client.
+
+    Returns:
+        True when the exception matches retry policy.
+    """
     if isinstance(
         exc,
         (
@@ -223,13 +239,38 @@ def _is_retryable_exception(exc) -> bool:
 
 
 class _WaitWithRetryAfter(wait_base):
-    """等待策略：优先使用 Retry-After 头，否则使用指数退避"""
+    """
+    Prefer Retry-After headers before falling back to exponential backoff.
+
+    Attributes:
+        _base_wait: The fallback exponential backoff strategy.
+        _protocol_error_base: Extra delay applied after protocol errors.
+    """
 
     def __init__(self, multiplier: float, max_wait: int):
+        """
+        Initialize the retry wait strategy.
+
+        Args:
+            multiplier: The exponential backoff multiplier.
+            max_wait: The maximum wait duration in seconds.
+
+        Returns:
+            None.
+        """
         self._base_wait = wait_random_exponential(multiplier=multiplier, max=max_wait)
         self._protocol_error_base = 3.0
 
     def __call__(self, retry_state):
+        """
+        Compute the next retry delay for the given retry state.
+
+        Args:
+            retry_state: The Tenacity retry state object.
+
+        Returns:
+            The delay in seconds before the next retry.
+        """
         if retry_state.outcome and retry_state.outcome.failed:
             exc = retry_state.outcome.exception()
             if (
@@ -244,7 +285,15 @@ class _WaitWithRetryAfter(wait_base):
         return self._base_wait(retry_state)
 
     def _parse_retry_after(self, response: httpx.Response) -> float | None:
-        """解析 Retry-After 头（支持秒数或 HTTP 日期格式）"""
+        """
+        Parse a Retry-After header value from an HTTP response.
+
+        Args:
+            response: The HTTP response carrying the Retry-After header.
+
+        Returns:
+            The retry delay in seconds, or None when parsing fails.
+        """
         header = response.headers.get("Retry-After")
         if not header:
             return None
@@ -264,11 +313,35 @@ class _WaitWithRetryAfter(wait_base):
 
 
 class GrokSearchProvider(BaseSearchProvider):
+    """
+    Call Grok-compatible endpoints for search and page-level tools.
+
+    Attributes:
+        model: The model identifier used for requests.
+    """
+
     def __init__(self, api_url: str, api_key: str, model: str = "grok-4-fast"):
+        """
+        Initialize the Grok search provider.
+
+        Args:
+            api_url: The upstream API base URL.
+            api_key: The API key used for authentication.
+            model: The model identifier used for requests.
+
+        Returns:
+            None.
+        """
         super().__init__(api_url, api_key)
         self.model = model
 
     def get_provider_name(self) -> str:
+        """
+        Return the provider display name.
+
+        Returns:
+            The provider name.
+        """
         return "Grok"
 
     async def search(
@@ -279,6 +352,19 @@ class GrokSearchProvider(BaseSearchProvider):
         max_results: int = 10,
         ctx=None,
     ) -> str:
+        """
+        Execute a Grok-backed web search request.
+
+        Args:
+            query: The user search query.
+            platform: An optional platform focus hint.
+            min_results: The minimum desired result count.
+            max_results: The maximum desired result count.
+            ctx: Optional FastMCP context used for logging.
+
+        Returns:
+            The raw model response text.
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -315,6 +401,16 @@ class GrokSearchProvider(BaseSearchProvider):
         return await self._execute_stream_with_retry(headers, payload, ctx)
 
     async def fetch(self, url: str, ctx=None) -> str:
+        """
+        Fetch and convert a webpage into structured Markdown text.
+
+        Args:
+            url: The target page URL.
+            ctx: Optional FastMCP context used for logging.
+
+        Returns:
+            The raw model response text.
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -394,7 +490,17 @@ class GrokSearchProvider(BaseSearchProvider):
     async def _execute_stream_with_retry(
         self, headers: dict[str, str], payload: dict[str, Any], ctx=None
     ) -> str:
-        """执行带重试机制的流式 HTTP 请求"""
+        """
+        Execute a streaming completion request with retry handling.
+
+        Args:
+            headers: The HTTP headers for the request.
+            payload: The JSON payload sent to the upstream API.
+            ctx: Optional FastMCP context used for logging.
+
+        Returns:
+            The cleaned model response text.
+        """
         timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
 
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -418,7 +524,16 @@ class GrokSearchProvider(BaseSearchProvider):
         raise RuntimeError("Search request ended without a response")
 
     async def describe_url(self, url: str, ctx=None) -> dict:
-        """让 Grok 阅读单个 URL 并返回 title + extracts"""
+        """
+        Ask Grok to inspect a URL and return a title with extracts.
+
+        Args:
+            url: The target page URL.
+            ctx: Optional FastMCP context used for logging.
+
+        Returns:
+            A dictionary containing the page title, extracts, and URL.
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -443,7 +558,18 @@ class GrokSearchProvider(BaseSearchProvider):
     async def rank_sources(
         self, query: str, sources_text: str, total: int, ctx=None
     ) -> list[int]:
-        """让 Grok 按查询相关度对信源排序，返回排序后的序号列表"""
+        """
+        Ask Grok to rank numbered sources by relevance to a query.
+
+        Args:
+            query: The user query.
+            sources_text: The numbered source list text.
+            total: The total number of numbered sources.
+            ctx: Optional FastMCP context used for logging.
+
+        Returns:
+            A list of ranked source numbers.
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -467,7 +593,6 @@ class GrokSearchProvider(BaseSearchProvider):
                     order.append(n)
             except ValueError:
                 continue
-        # 补齐遗漏的序号
         for i in range(1, total + 1):
             if i not in seen:
                 order.append(i)

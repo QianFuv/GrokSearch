@@ -113,6 +113,23 @@ async def test_web_search_surfaces_upstream_errors(monkeypatch):
     monkeypatch.setenv("GROK_API_KEY", "test-key")
 
     async def boom(self, query, platform="", min_results=3, max_results=10, ctx=None):
+        """
+        Raise a deterministic upstream failure for the provider.
+
+        Args:
+            self: The provider instance.
+            query: The search query.
+            platform: The optional platform hint.
+            min_results: The minimum requested result count.
+            max_results: The maximum requested result count.
+            ctx: Optional request context.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: Always raised for the test.
+        """
         raise RuntimeError("boom")
 
     monkeypatch.setattr(server.GrokSearchProvider, "search", boom)
@@ -139,9 +156,33 @@ async def test_web_search_reports_missing_body_when_only_sources_exist(monkeypat
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
 
     async def empty(self, query, platform="", min_results=3, max_results=10, ctx=None):
+        """
+        Return an empty provider response for fallback coverage.
+
+        Args:
+            self: The provider instance.
+            query: The search query.
+            platform: The optional platform hint.
+            min_results: The minimum requested result count.
+            max_results: The maximum requested result count.
+            ctx: Optional request context.
+
+        Returns:
+            An empty string.
+        """
         return ""
 
     async def tavily_results(query, max_results=6):
+        """
+        Return a deterministic Tavily search payload.
+
+        Args:
+            query: The search query.
+            max_results: The maximum number of requested results.
+
+        Returns:
+            A single normalized Tavily result.
+        """
         return [
             {
                 "title": "OpenAI Docs",
@@ -185,6 +226,20 @@ async def test_web_search_retries_when_first_response_only_contains_sources(
     calls = {"count": 0}
 
     async def flaky(self, query, platform="", min_results=3, max_results=10, ctx=None):
+        """
+        Return sources only on the first call and a full answer on retry.
+
+        Args:
+            self: The provider instance.
+            query: The search query.
+            platform: The optional platform hint.
+            min_results: The minimum requested result count.
+            max_results: The maximum requested result count.
+            ctx: Optional request context.
+
+        Returns:
+            A simulated provider response string.
+        """
         calls["count"] += 1
         if calls["count"] == 1:
             return "Sources\n- [FastMCP](https://gofastmcp.com)"

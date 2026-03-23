@@ -22,7 +22,15 @@ _META_REFUSAL_MARKERS = (
 
 
 def extract_unique_urls(text: str) -> list[str]:
-    """从文本中提取所有唯一 URL，按首次出现顺序排列"""
+    """
+    Extract unique URLs from text in first-seen order.
+
+    Args:
+        text: The text to scan for URLs.
+
+    Returns:
+        A list of unique URLs in first-seen order.
+    """
     seen: set[str] = set()
     urls: list[str] = []
     for m in _URL_PATTERN.finditer(text):
@@ -34,6 +42,15 @@ def extract_unique_urls(text: str) -> list[str]:
 
 
 def format_search_results(results: list[SearchResult]) -> str:
+    """
+    Render normalized search results into a Markdown block.
+
+    Args:
+        results: The normalized search results to format.
+
+    Returns:
+        A Markdown string describing the results.
+    """
     if not results:
         return "No results found."
 

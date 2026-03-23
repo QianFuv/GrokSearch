@@ -38,16 +38,50 @@ _FOOTNOTE_LINK_LINE_PATTERN = re.compile(r"^\[[^\]]+\]:\s*https?://\S+$")
 
 
 def new_session_id() -> str:
+    """
+    Generate a short session identifier for cached search sources.
+
+    Returns:
+        A short random hexadecimal session identifier.
+    """
     return uuid.uuid4().hex[:12]
 
 
 class SourcesCache:
+    """
+    Store cached source lists in a bounded asynchronous LRU cache.
+
+    Attributes:
+        _max_size: The maximum number of cached sessions.
+        _lock: The lock guarding cache mutations.
+        _cache: The ordered mapping of session IDs to sources.
+    """
+
     def __init__(self, max_size: int = 256):
+        """
+        Initialize the bounded source cache.
+
+        Args:
+            max_size: The maximum number of cached sessions to retain.
+
+        Returns:
+            None.
+        """
         self._max_size = max_size
         self._lock = asyncio.Lock()
         self._cache: OrderedDict[str, list[dict]] = OrderedDict()
 
     async def set(self, session_id: str, sources: list[dict]) -> None:
+        """
+        Store sources for a session and evict the oldest entries when needed.
+
+        Args:
+            session_id: The session identifier.
+            sources: The normalized source list to cache.
+
+        Returns:
+            None.
+        """
         async with self._lock:
             self._cache[session_id] = sources
             self._cache.move_to_end(session_id)
@@ -55,6 +89,15 @@ class SourcesCache:
                 self._cache.popitem(last=False)
 
     async def get(self, session_id: str) -> list[dict] | None:
+        """
+        Retrieve cached sources for a session.
+
+        Args:
+            session_id: The session identifier.
+
+        Returns:
+            The cached source list, or None when missing.
+        """
         async with self._lock:
             sources = self._cache.get(session_id)
             if sources is None:
@@ -64,6 +107,15 @@ class SourcesCache:
 
 
 def merge_sources(*source_lists: list[dict]) -> list[dict]:
+    """
+    Merge multiple source lists while deduplicating by URL.
+
+    Args:
+        *source_lists: Source lists to merge.
+
+    Returns:
+        A merged list containing unique URLs in first-seen order.
+    """
     seen: set[str] = set()
     merged: list[dict] = []
     for sources in source_lists:
@@ -143,6 +195,15 @@ def _split_inline_heading_sources(text: str) -> tuple[str, list[dict]] | None:
 
 
 def _split_function_call_sources(text: str) -> tuple[str, list[dict]] | None:
+    """
+    Split source payloads expressed as trailing function-like calls.
+
+    Args:
+        text: The raw model output text.
+
+    Returns:
+        A tuple of answer text and sources when a matching payload is found.
+    """
     matches = list(_SOURCES_FUNCTION_PATTERN.finditer(text))
     if not matches:
         return None
@@ -167,6 +228,16 @@ def _split_function_call_sources(text: str) -> tuple[str, list[dict]] | None:
 def _extract_balanced_call_at_end(
     text: str, open_paren_idx: int
 ) -> tuple[int, str] | None:
+    """
+    Extract the argument payload from a balanced trailing call expression.
+
+    Args:
+        text: The raw text containing the trailing call.
+        open_paren_idx: The index of the opening parenthesis.
+
+    Returns:
+        A tuple of closing parenthesis index and argument text when valid.
+    """
     if open_paren_idx < 0 or open_paren_idx >= len(text) or text[open_paren_idx] != "(":
         return None
 
@@ -206,6 +277,15 @@ def _extract_balanced_call_at_end(
 
 
 def _split_heading_sources(text: str) -> tuple[str, list[dict]] | None:
+    """
+    Split trailing source sections introduced by a dedicated heading line.
+
+    Args:
+        text: The raw model output text.
+
+    Returns:
+        A tuple of answer text and sources when a heading block is found.
+    """
     matches = list(_SOURCES_HEADING_PATTERN.finditer(text))
     if not matches:
         return None
@@ -222,6 +302,15 @@ def _split_heading_sources(text: str) -> tuple[str, list[dict]] | None:
 
 
 def _split_tail_link_block(text: str) -> tuple[str, list[dict]] | None:
+    """
+    Split a trailing block made up only of source links.
+
+    Args:
+        text: The raw model output text.
+
+    Returns:
+        A tuple of answer text and sources when a trailing link block is found.
+    """
     lines = text.splitlines()
     if not lines:
         return None
@@ -258,6 +347,15 @@ def _split_tail_link_block(text: str) -> tuple[str, list[dict]] | None:
 
 
 def _split_details_block_sources(text: str) -> tuple[str, list[dict]] | None:
+    """
+    Split trailing sources wrapped inside an HTML details block.
+
+    Args:
+        text: The raw model output text.
+
+    Returns:
+        A tuple of answer text and sources when a supported block is found.
+    """
     lower = text.lower()
     close_idx = lower.rfind("</details>")
     if close_idx == -1:
@@ -300,6 +398,15 @@ def _is_link_only_line(line: str) -> bool:
 
 
 def _parse_sources_payload(payload: str) -> list[dict]:
+    """
+    Parse a structured source payload from JSON, Python literals, or raw text.
+
+    Args:
+        payload: The payload string to parse.
+
+    Returns:
+        A normalized list of source dictionaries.
+    """
     payload = (payload or "").strip().rstrip(";")
     if not payload:
         return []
@@ -326,6 +433,15 @@ def _parse_sources_payload(payload: str) -> list[dict]:
 
 
 def _normalize_sources(data: Any) -> list[dict]:
+    """
+    Normalize heterogeneous source payloads into URL-keyed dictionaries.
+
+    Args:
+        data: Raw source data from parsed payloads.
+
+    Returns:
+        A normalized list of source dictionaries.
+    """
     items: list[Any]
     if isinstance(data, (list, tuple)):
         items = list(data)
@@ -383,6 +499,15 @@ def _normalize_sources(data: Any) -> list[dict]:
 
 
 def _extract_sources_from_text(text: str) -> list[dict]:
+    """
+    Extract Markdown and plain URLs from free-form text.
+
+    Args:
+        text: The text to scan for source URLs.
+
+    Returns:
+        A normalized list of extracted source dictionaries.
+    """
     sources: list[dict] = []
     seen: set[str] = set()
 

@@ -201,6 +201,16 @@ async def _search_with_answer_retry(
 
 
 async def _fetch_available_models(api_url: str, api_key: str) -> list[str]:
+    """
+    Fetch the available model identifiers from the upstream API.
+
+    Args:
+        api_url: The upstream API base URL.
+        api_key: The API key used for authentication.
+
+    Returns:
+        A list of available model identifiers.
+    """
     import httpx
 
     models_url = f"{api_url.rstrip('/')}/models"
@@ -223,6 +233,16 @@ async def _fetch_available_models(api_url: str, api_key: str) -> list[str]:
 
 
 async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
+    """
+    Fetch available models with an in-memory cache.
+
+    Args:
+        api_url: The upstream API base URL.
+        api_key: The API key used for authentication.
+
+    Returns:
+        A cached or freshly fetched list of model identifiers.
+    """
     key = (api_url, api_key)
     async with _AVAILABLE_MODELS_LOCK:
         if key in _AVAILABLE_MODELS_CACHE:
@@ -239,6 +259,16 @@ async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:
 
 
 def _apply_model_suffix(api_url: str, model: str) -> str:
+    """
+    Normalize a model name for proxy-specific routing rules.
+
+    Args:
+        api_url: The upstream API base URL.
+        model: The requested model identifier.
+
+    Returns:
+        The normalized model identifier.
+    """
     if "openrouter" in api_url and ":online" not in model:
         return f"{model}:online"
     return model
@@ -247,6 +277,17 @@ def _apply_model_suffix(api_url: str, model: str) -> str:
 def _is_available_model(
     api_url: str, requested_model: str, available_models: list[str]
 ) -> bool:
+    """
+    Check whether a requested model appears in the fetched model list.
+
+    Args:
+        api_url: The upstream API base URL.
+        requested_model: The model requested by the caller.
+        available_models: The fetched model identifiers.
+
+    Returns:
+        True when the requested model is available.
+    """
     return any(
         candidate in available_models
         for candidate in (
@@ -259,6 +300,20 @@ def _is_available_model(
 async def _resolve_request_model(
     api_url: str, api_key: str, requested_model: str
 ) -> str:
+    """
+    Resolve the effective model for a request.
+
+    Args:
+        api_url: The upstream API base URL.
+        api_key: The API key used for authentication.
+        requested_model: The model explicitly requested by the caller.
+
+    Returns:
+        The effective model identifier for the request.
+
+    Raises:
+        ValueError: Raised when an explicit model is invalid.
+    """
     if not requested_model:
         return config.grok_model
 
@@ -269,6 +324,20 @@ async def _resolve_request_model(
 
 
 async def _validate_model_selection(api_url: str, api_key: str, model: str) -> None:
+    """
+    Validate that a model exists in the upstream /models response.
+
+    Args:
+        api_url: The upstream API base URL.
+        api_key: The API key used for authentication.
+        model: The model identifier to validate.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: Raised when validation fails or no models are returned.
+    """
     try:
         available = await _fetch_available_models(api_url, api_key)
     except Exception as exc:
@@ -288,17 +357,44 @@ async def _validate_model_selection(api_url: str, api_key: str, model: str) -> N
 
 
 def _retry_delay_seconds(retry_index: int) -> float:
+    """
+    Compute the retry delay for a retry attempt index.
+
+    Args:
+        retry_index: The 1-based retry attempt index.
+
+    Returns:
+        The retry delay in seconds.
+    """
     delay = config.retry_multiplier * (2 ** max(retry_index - 1, 0))
     return min(float(config.retry_max_wait), max(0.0, delay))
 
 
 async def _sleep_before_retry(retry_index: int) -> None:
+    """
+    Sleep for the configured retry delay when positive.
+
+    Args:
+        retry_index: The 1-based retry attempt index.
+
+    Returns:
+        None.
+    """
     delay = _retry_delay_seconds(retry_index)
     if delay > 0:
         await asyncio.sleep(delay)
 
 
 def _extra_results_to_sources(tavily_results: list[dict] | None) -> list[dict]:
+    """
+    Convert Tavily search results into normalized source records.
+
+    Args:
+        tavily_results: Raw Tavily search results.
+
+    Returns:
+        A normalized list of source dictionaries.
+    """
     sources: list[dict] = []
     seen: set[str] = set()
 
@@ -358,6 +454,18 @@ async def web_search(
         ("Number of additional reference results from Tavily. Set 0 to disable."),
     ] = 0,
 ) -> dict:
+    """
+    Execute a Grok web search and cache any extracted sources.
+
+    Args:
+        query: The natural-language search query.
+        platform: An optional platform focus hint.
+        model: An optional per-request model override.
+        extra_sources: The number of extra Tavily sources to request.
+
+    Returns:
+        A dictionary containing the session ID, answer text, and source count.
+    """
     session_id = new_session_id()
     try:
         api_url = config.grok_api_url
@@ -385,9 +493,21 @@ async def web_search(
     tavily_count = extra_sources if extra_sources > 0 and config.tavily_api_key else 0
 
     async def _safe_grok() -> str:
+        """
+        Execute the Grok search path with semantic answer retries.
+
+        Returns:
+            The raw Grok response text.
+        """
         return await _search_with_answer_retry(grok_provider, query, platform)
 
     async def _safe_tavily() -> list[dict] | None:
+        """
+        Fetch extra Tavily sources while swallowing optional failures.
+
+        Returns:
+            A list of Tavily results, or None when unavailable.
+        """
         try:
             if tavily_count:
                 return await _call_tavily_search(query, tavily_count)
@@ -449,6 +569,15 @@ async def web_search(
 async def get_sources(
     session_id: Annotated[str, "Session ID from previous web_search call."],
 ) -> dict:
+    """
+    Retrieve cached sources for a previous web_search session.
+
+    Args:
+        session_id: The session identifier returned by web_search.
+
+    Returns:
+        A dictionary containing the cached sources or an expiration error.
+    """
     sources = await _SOURCES_CACHE.get(session_id)
     if sources is None:
         return {
@@ -461,6 +590,15 @@ async def get_sources(
 
 
 async def _call_tavily_extract(url: str) -> str | None:
+    """
+    Call Tavily extract until structured content becomes available.
+
+    Args:
+        url: The page URL to extract.
+
+    Returns:
+        The extracted Markdown content, or None when unavailable.
+    """
     import httpx
 
     api_url = config.tavily_api_url
@@ -493,6 +631,16 @@ async def _call_tavily_extract(url: str) -> str | None:
 
 
 async def _call_tavily_search(query: str, max_results: int = 6) -> list[dict] | None:
+    """
+    Call Tavily search and normalize its search results.
+
+    Args:
+        query: The search query text.
+        max_results: The maximum number of search results to request.
+
+    Returns:
+        A normalized result list, or None when unavailable.
+    """
     import httpx
 
     api_key = config.tavily_api_key
@@ -568,6 +716,16 @@ async def web_fetch(
     ],
     ctx: Context | None = None,
 ) -> str:
+    """
+    Fetch and extract a webpage into Markdown using Tavily.
+
+    Args:
+        url: The target page URL.
+        ctx: Optional FastMCP context used for logging.
+
+    Returns:
+        Extracted Markdown content or an error message.
+    """
     await log_info(ctx, f"Begin Fetch: {url}", config.debug_enabled)
 
     if not config.tavily_api_key:
@@ -590,6 +748,20 @@ async def _call_tavily_map(
     limit: int = 50,
     timeout: int = 150,
 ) -> str:
+    """
+    Call Tavily map with same-site defaults and fallback behavior.
+
+    Args:
+        url: The root URL to map.
+        instructions: Optional natural-language crawl instructions.
+        max_depth: The maximum crawl depth.
+        max_breadth: The maximum breadth per page.
+        limit: The total result limit.
+        timeout: The request timeout in seconds.
+
+    Returns:
+        A JSON string describing the map response or an error message.
+    """
     import json
 
     import httpx
@@ -750,6 +922,20 @@ async def web_map(
         Field(description="Maximum time in seconds for the operation.", ge=10, le=150),
     ] = 150,
 ) -> str:
+    """
+    Traverse a website and return a same-site map response.
+
+    Args:
+        url: The root URL to map.
+        instructions: Optional natural-language crawl instructions.
+        max_depth: The maximum crawl depth.
+        max_breadth: The maximum breadth per page.
+        limit: The total result limit.
+        timeout: The request timeout in seconds.
+
+    Returns:
+        A JSON string describing the map response.
+    """
     result = await _call_tavily_map(
         url, instructions, max_depth, max_breadth, limit, timeout
     )
@@ -775,6 +961,12 @@ async def web_map(
     meta={"version": "1.3.0", "author": "guda.studio"},
 )
 async def get_config_info() -> str:
+    """
+    Return current configuration details and connectivity diagnostics.
+
+    Returns:
+        A JSON string containing configuration details and connection status.
+    """
     import json
     import time
 
@@ -858,6 +1050,15 @@ async def switch_model(
         ),
     ],
 ) -> str:
+    """
+    Persist a new default Grok model after validating it.
+
+    Args:
+        model: The model identifier to persist.
+
+    Returns:
+        A JSON string describing the update outcome.
+    """
     import json
 
     try:
@@ -908,6 +1109,17 @@ async def describe_url(
     ] = "",
     ctx: Context | None = None,
 ) -> dict:
+    """
+    Ask Grok to describe a single page and extract verbatim snippets.
+
+    Args:
+        url: The target page URL.
+        model: An optional per-request model override.
+        ctx: Optional FastMCP context used for logging.
+
+    Returns:
+        A dictionary containing the page description result.
+    """
     try:
         api_url = config.grok_api_url
         api_key = config.grok_api_key
@@ -957,6 +1169,19 @@ async def rank_sources(
     ] = "",
     ctx: Context | None = None,
 ) -> dict:
+    """
+    Ask Grok to rank a numbered source list against a query.
+
+    Args:
+        query: The user query.
+        sources_text: The numbered source list.
+        total: The total number of sources in the list.
+        model: An optional per-request model override.
+        ctx: Optional FastMCP context used for logging.
+
+    Returns:
+        A dictionary containing the ranked source order or an error.
+    """
     try:
         api_url = config.grok_api_url
         api_key = config.grok_api_key
@@ -1005,6 +1230,25 @@ async def plan_intent(
     unverified_terms: Annotated[str, "Comma-separated external terms to verify"] = "",
     is_revision: Annotated[bool, "True to overwrite existing intent"] = False,
 ) -> str:
+    """
+    Record intent analysis for a planning session.
+
+    Args:
+        thought: The reasoning behind the submitted phase.
+        core_question: The distilled user question.
+        query_type: The search query type.
+        time_sensitivity: The freshness requirement classification.
+        session_id: An optional existing session identifier.
+        confidence: The reported confidence score.
+        domain: The detected subject domain.
+        premise_valid: Whether the user premise appears valid.
+        ambiguities: Comma-separated unresolved ambiguities.
+        unverified_terms: Comma-separated external terms requiring verification.
+        is_revision: Whether this call replaces an earlier intent analysis.
+
+    Returns:
+        A JSON string describing the updated planning session state.
+    """
     import json
 
     data: dict[str, object] = {
@@ -1052,6 +1296,22 @@ async def plan_complexity(
     confidence: Annotated[float, "Confidence 0.0-1.0"] = 1.0,
     is_revision: Annotated[bool, "True to overwrite"] = False,
 ) -> str:
+    """
+    Record complexity assessment for an existing planning session.
+
+    Args:
+        session_id: The planning session identifier.
+        thought: The reasoning behind the assessment.
+        level: The complexity level.
+        estimated_sub_queries: The expected number of sub-queries.
+        estimated_tool_calls: The expected number of tool calls.
+        justification: The reason for the selected level.
+        confidence: The reported confidence score.
+        is_revision: Whether this call replaces an earlier assessment.
+
+    Returns:
+        A JSON string describing the updated planning session state.
+    """
     import json
 
     if not planning_engine.get_session(session_id):
@@ -1097,6 +1357,24 @@ async def plan_sub_query(
     tool_hint: Annotated[str, "web_search | web_fetch | web_map"] = "",
     is_revision: Annotated[bool, "True to replace all sub-queries"] = False,
 ) -> str:
+    """
+    Record one decomposed sub-query for a planning session.
+
+    Args:
+        session_id: The planning session identifier.
+        thought: The reasoning behind the sub-query.
+        id: The sub-query identifier.
+        goal: The sub-query goal.
+        expected_output: The success criteria for the sub-query.
+        boundary: The explicit exclusion boundary for the sub-query.
+        confidence: The reported confidence score.
+        depends_on: Comma-separated prerequisite IDs.
+        tool_hint: An optional suggested tool.
+        is_revision: Whether this call replaces earlier sub-queries.
+
+    Returns:
+        A JSON string describing the updated planning session state.
+    """
     import json
 
     if not planning_engine.get_session(session_id):
@@ -1148,6 +1426,23 @@ async def plan_search_term(
     fallback_plan: Annotated[str, "Fallback if primary searches fail"] = "",
     is_revision: Annotated[bool, "True to replace all search terms"] = False,
 ) -> str:
+    """
+    Record one search term submission for a planning session.
+
+    Args:
+        session_id: The planning session identifier.
+        thought: The reasoning behind the search term.
+        term: The search term text.
+        purpose: The sub-query served by the term.
+        round: The execution round number.
+        confidence: The reported confidence score.
+        approach: The overall search strategy approach.
+        fallback_plan: The fallback plan for failed searches.
+        is_revision: Whether this call replaces earlier search terms.
+
+    Returns:
+        A JSON string describing the updated planning session state.
+    """
     import json
 
     if not planning_engine.get_session(session_id):
@@ -1193,6 +1488,22 @@ async def plan_tool_mapping(
     params_json: Annotated[str, "Optional JSON string for tool-specific params"] = "",
     is_revision: Annotated[bool, "True to replace all mappings"] = False,
 ) -> str:
+    """
+    Record one tool mapping for a planning session.
+
+    Args:
+        session_id: The planning session identifier.
+        thought: The reasoning behind the mapping.
+        sub_query_id: The target sub-query identifier.
+        tool: The selected tool name.
+        reason: The rationale for the mapping.
+        confidence: The reported confidence score.
+        params_json: Optional JSON-encoded tool parameters.
+        is_revision: Whether this call replaces earlier mappings.
+
+    Returns:
+        A JSON string describing the updated planning session state.
+    """
     import json
 
     if not planning_engine.get_session(session_id):
@@ -1236,6 +1547,21 @@ async def plan_execution(
     confidence: Annotated[float, "Confidence 0.0-1.0"] = 1.0,
     is_revision: Annotated[bool, "True to overwrite"] = False,
 ) -> str:
+    """
+    Record execution order for a planning session.
+
+    Args:
+        session_id: The planning session identifier.
+        thought: The reasoning behind the execution order.
+        parallel_groups: Semicolon-separated groups of comma-separated IDs.
+        sequential: Comma-separated IDs that must run sequentially.
+        estimated_rounds: The expected number of execution rounds.
+        confidence: The reported confidence score.
+        is_revision: Whether this call replaces earlier execution order data.
+
+    Returns:
+        A JSON string describing the updated planning session state.
+    """
     import json
 
     if not planning_engine.get_session(session_id):
@@ -1267,6 +1593,12 @@ async def plan_execution(
 
 
 def main():
+    """
+    Run the FastMCP server and ensure child shutdown on parent exit.
+
+    Returns:
+        None.
+    """
     import os
     import signal
     import threading
@@ -1274,6 +1606,16 @@ def main():
     if threading.current_thread() is threading.main_thread():
 
         def handle_shutdown(signum, frame):
+            """
+            Exit immediately when a shutdown signal is received.
+
+            Args:
+                signum: The received signal number.
+                frame: The current stack frame.
+
+            Returns:
+                None.
+            """
             os._exit(0)
 
         signal.signal(signal.SIGINT, handle_shutdown)
@@ -1287,7 +1629,15 @@ def main():
         parent_pid = os.getppid()
 
         def is_parent_alive(pid):
-            """Check whether the parent process is still alive on Windows."""
+            """
+            Check whether the parent process is still alive on Windows.
+
+            Args:
+                pid: The parent process identifier.
+
+            Returns:
+                True when the parent process is still running.
+            """
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             STILL_ACTIVE = 259
             kernel32 = ctypes.windll.kernel32
@@ -1300,6 +1650,12 @@ def main():
             return result and exit_code.value == STILL_ACTIVE
 
         def monitor_parent():
+            """
+            Exit the process when the parent process disappears.
+
+            Returns:
+                None.
+            """
             while True:
                 if not is_parent_alive(parent_pid):
                     os._exit(0)
