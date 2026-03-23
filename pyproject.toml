@@ -1,13 +1,9 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "grok-search"
 version = "0.1.0"
 description = "MCP server for AI model search capabilities"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=2.3.0",
     "httpx[socks]>=0.28.0",
@@ -17,12 +13,30 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.18.2",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "ruff>=0.14.6",
 ]
+
+[project.scripts]
+grok-search = "grok_search.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[project.scripts]
-grok-search = "grok_search.server:main"
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'win32'",
+    "sys_platform == 'linux'",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+
+[tool.mypy]
+disable_error_code = ["import-untyped"]

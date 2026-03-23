@@ -7,7 +7,7 @@
 
 **Grok-with-Tavily MCP，为 Claude Code 提供更完善的网络访问能力**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/) [![FastMCP](https://img.shields.io/badge/FastMCP-2.0.0+-green.svg)](https://github.com/jlowin/fastmcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/) [![FastMCP](https://img.shields.io/badge/FastMCP-2.0.0+-green.svg)](https://github.com/jlowin/fastmcp)
 
 </div>
 
@@ -46,7 +46,7 @@ Claude ──MCP──► Grok Search Server
 
 ### 前置条件
 
-- Python 3.10+
+- Python 3.12+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)（推荐的 Python 包管理器）
 - Claude Code
 
