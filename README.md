@@ -171,7 +171,7 @@ claude mcp list
 ## 三、MCP 工具介绍
 
 <details>
-<summary>本项目提供九个 MCP 工具（展开查看）</summary>
+<summary>本项目提供八个 MCP 工具（展开查看）</summary>
 
 ### `web_search` — AI 网络搜索
 
@@ -259,9 +259,6 @@ claude mcp list
 | `total` | int | ✅ | - | 信源总数 |
 | `model` | string | ❌ | `""` | 按次指定 Grok 模型 ID |
 
-### `search_planning` — 搜索规划
-
-结构化搜索规划脚手架（分阶段、多轮），用于在执行复杂搜索前先生成可执行的搜索计划。
 </details>
 
 ## 四、常见问题
