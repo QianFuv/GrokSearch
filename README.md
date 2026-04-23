@@ -25,24 +25,7 @@ Tavily is optional. Without Tavily, `web_fetch` and `web_map` will not work.
 
 ### Claude Code
 
-If you use GuDa, this is enough:
-
-```bash
-claude mcp add-json grok-search --scope user '{
-  "type": "stdio",
-  "command": "uvx",
-  "args": [
-    "--from",
-    "git+https://github.com/GuDaStudio/GrokSearch",
-    "grok-search"
-  ],
-  "env": {
-    "GUDA_API_KEY": "your-guda-api-key"
-  }
-}'
-```
-
-If you use your own endpoints:
+Configure Grok directly. Add Tavily if you want `web_fetch` and `web_map`:
 
 ```bash
 claude mcp add-json grok-search --scope user '{
@@ -77,15 +60,11 @@ The server runs over stdio.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `GUDA_API_KEY` | No | - | Enables derived Grok and Tavily settings. |
-| `GUDA_BASE_URL` | No | `https://code.guda.studio` | Base URL for GuDa services. |
-| `GROK_API_URL` | Yes* | Derived from `GUDA_BASE_URL` | Must be OpenAI-compatible. |
-| `GROK_API_KEY` | Yes* | Derived from `GUDA_API_KEY` | Used for Grok requests. |
+| `GROK_API_URL` | Yes | - | Must be OpenAI-compatible. |
+| `GROK_API_KEY` | Yes | - | Used for Grok requests. |
 | `GROK_MODEL` | No | `grok-4.20-beta` | Default model. |
 | `TAVILY_API_URL` | No | `https://api.tavily.com` | Used by `web_fetch` and `web_map`. |
-| `TAVILY_API_KEY` | No | Derived from `GUDA_API_KEY` | Required only for Tavily-backed tools. |
-
-\* `GROK_API_URL` and `GROK_API_KEY` are required unless `GUDA_API_KEY` is set.
+| `TAVILY_API_KEY` | No | - | Required only for Tavily-backed tools. |
 
 ### Optional Variables
 

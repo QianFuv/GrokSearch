@@ -23,10 +23,12 @@ class Config:
         "claude mcp add-json grok-search --scope user "
         '\'{"type":"stdio","command":"uvx","args":["--from",'
         '"git+https://github.com/GuDaStudio/GrokSearch","grok-search"],'
-        '"env":{"GUDA_API_KEY":"your-guda-api-key"}}\''
+        '"env":{"GROK_API_URL":"https://your-api-endpoint.com/v1",'
+        '"GROK_API_KEY":"your-grok-api-key",'
+        '"TAVILY_API_URL":"https://api.tavily.com",'
+        '"TAVILY_API_KEY":"your-tavily-api-key"}}\''
     )
     _DEFAULT_MODEL = "grok-4.20-beta"
-    _DEFAULT_GUDA_BASE_URL = "https://code.guda.studio"
 
     def __new__(cls) -> "Config":
         """
@@ -137,26 +139,6 @@ class Config:
         return int(os.getenv("GROK_RETRY_MAX_WAIT", "10"))
 
     @property
-    def guda_base_url(self) -> str:
-        """
-        Read the GuDa proxy base URL.
-
-        Returns:
-            The GuDa base URL.
-        """
-        return os.getenv("GUDA_BASE_URL", self._DEFAULT_GUDA_BASE_URL)
-
-    @property
-    def guda_api_key(self) -> str | None:
-        """
-        Read the GuDa API key when configured.
-
-        Returns:
-            The GuDa API key or None.
-        """
-        return os.getenv("GUDA_API_KEY")
-
-    @property
     def grok_api_url(self) -> str:
         """
         Resolve the effective Grok API base URL.
@@ -169,8 +151,6 @@ class Config:
         """
         url = os.getenv("GROK_API_URL")
         if not url:
-            if self.guda_api_key:
-                return f"{self.guda_base_url}/grok/v1"
             raise ValueError(
                 "Grok API URL is not configured.\n"
                 "Configure the MCP server with:\n"
@@ -189,7 +169,7 @@ class Config:
         Raises:
             ValueError: Raised when no Grok credential is configured.
         """
-        key = os.getenv("GROK_API_KEY") or self.guda_api_key
+        key = os.getenv("GROK_API_KEY")
         if not key:
             raise ValueError(
                 "Grok API key is not configured.\n"
@@ -217,8 +197,6 @@ class Config:
             The Tavily API base URL.
         """
         url = os.getenv("TAVILY_API_URL")
-        if not url and self.guda_api_key:
-            return f"{self.guda_base_url}/tavily"
         return url or "https://api.tavily.com"
 
     @property
@@ -229,7 +207,7 @@ class Config:
         Returns:
             The Tavily API key or None.
         """
-        return os.getenv("TAVILY_API_KEY") or self.guda_api_key
+        return os.getenv("TAVILY_API_KEY")
 
     @property
     def log_level(self) -> str:
@@ -358,10 +336,6 @@ class Config:
             config_status = f"configuration error: {e}"
 
         info = {
-            "GUDA_BASE_URL": self.guda_base_url,
-            "GUDA_API_KEY": self._mask_api_key(self.guda_api_key)
-            if self.guda_api_key
-            else "not configured",
             "GROK_API_URL": api_url,
             "GROK_API_KEY": api_key_masked,
             "GROK_MODEL": self.grok_model,

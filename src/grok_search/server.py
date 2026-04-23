@@ -424,7 +424,7 @@ def _extra_results_to_sources(tavily_results: list[dict] | None) -> list[dict]:
     - content: string (answer only)
     - sources_count: int
     """,
-    meta={"version": "2.0.0", "author": "guda.studio"},
+    meta={"version": "2.0.0", "author": "grok-search"},
 )
 async def web_search(
     query: Annotated[str, "Clear, self-contained natural-language search query."],
@@ -557,7 +557,7 @@ async def web_search(
     Retrieve all cached sources for a previous web_search call.
     Provide the session_id returned by web_search to get the full source list.
     """,
-    meta={"version": "1.0.0", "author": "guda.studio"},
+    meta={"version": "1.0.0", "author": "grok-search"},
 )
 async def get_sources(
     session_id: Annotated[str, "Session ID from previous web_search call."],
@@ -697,7 +697,7 @@ async def _call_tavily_search(query: str, max_results: int = 6) -> list[dict] | 
         - May not capture dynamically loaded content requiring JavaScript execution.
         - Large pages may take longer to process; consider timeout implications.
     """,
-    meta={"version": "1.3.0", "author": "guda.studio"},
+    meta={"version": "1.3.0", "author": "grok-search"},
 )
 async def web_fetch(
     url: Annotated[
@@ -881,7 +881,7 @@ async def _call_tavily_map(
         - Large sites may hit timeout limits, so adjust timeout and limit
           parameters accordingly.
     """,
-    meta={"version": "1.3.0", "author": "guda.studio"},
+    meta={"version": "1.3.0", "author": "grok-search"},
 )
 async def web_map(
     url: Annotated[
@@ -951,7 +951,7 @@ async def web_map(
         - API keys are automatically masked for security in the response.
         - Connection test timeout is 10 seconds; network issues may cause delays.
     """,
-    meta={"version": "1.3.0", "author": "guda.studio"},
+    meta={"version": "1.3.0", "author": "grok-search"},
 )
 async def get_config_info() -> str:
     """
@@ -1032,7 +1032,7 @@ async def get_config_info() -> str:
         - Invalid model IDs may cause API errors in subsequent requests.
         - Model changes persist across sessions until explicitly changed again.
     """,
-    meta={"version": "1.3.0", "author": "guda.studio"},
+    meta={"version": "1.3.0", "author": "grok-search"},
 )
 async def switch_model(
     model: Annotated[
@@ -1086,7 +1086,7 @@ async def switch_model(
     description="""
     Ask Grok to read a single page and return a title plus verbatim extracts.
     """,
-    meta={"version": "1.3.0", "author": "guda.studio"},
+    meta={"version": "1.3.0", "author": "grok-search"},
 )
 async def describe_url(
     url: Annotated[
@@ -1138,7 +1138,7 @@ async def describe_url(
     description="""
     Ask Grok to reorder a numbered source list by relevance to a query.
     """,
-    meta={"version": "1.3.0", "author": "guda.studio"},
+    meta={"version": "1.3.0", "author": "grok-search"},
 )
 async def rank_sources(
     query: Annotated[str, "The user query to rank sources against."],
