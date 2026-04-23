@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from grok_search.clients.tavily import TavilyClient
+from grok_search.clients.tavily import TavilyClient, normalize_tavily_api_base_url
 from grok_search.config import config
 
 
@@ -51,6 +51,27 @@ class FakeResponse:
         return self._payload
 
 
+def test_normalize_tavily_api_base_url_accepts_hikari_mcp_url() -> None:
+    """
+    Verify that Hikari MCP URLs are converted to the Tavily HTTP facade.
+
+    Returns:
+        None.
+    """
+    assert (
+        normalize_tavily_api_base_url("https://tavily.example.com/mcp")
+        == "https://tavily.example.com/api/tavily"
+    )
+    assert (
+        normalize_tavily_api_base_url("https://proxy.example.com/prefix/mcp/")
+        == "https://proxy.example.com/prefix/api/tavily"
+    )
+    assert (
+        normalize_tavily_api_base_url("https://api.tavily.com/")
+        == "https://api.tavily.com"
+    )
+
+
 @pytest.mark.asyncio
 async def test_map_site_requests_same_site_defaults_and_filters_results(
     monkeypatch,
@@ -65,7 +86,7 @@ async def test_map_site_requests_same_site_defaults_and_filters_results(
         None.
     """
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-    monkeypatch.setenv("TAVILY_API_URL", "https://example.invalid")
+    monkeypatch.setenv("TAVILY_API_URL", "https://example.invalid/mcp")
 
     captured: dict[str, object] = {}
 
@@ -149,7 +170,7 @@ async def test_map_site_requests_same_site_defaults_and_filters_results(
         timeout=30,
     )
 
-    assert captured["endpoint"] == "https://example.invalid/map"
+    assert captured["endpoint"] == "https://example.invalid/api/tavily/map"
     assert captured["json"] == {
         "url": "https://example.com/docs",
         "max_depth": 1,

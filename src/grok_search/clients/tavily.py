@@ -1,12 +1,39 @@
 """Tavily client helpers for extract, search, and map operations."""
 
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
 from ..config import Config
 from ..runtime import get_retry_settings, sleep_before_retry
+
+HIKARI_MCP_PATH = "/mcp"
+HIKARI_TAVILY_API_PATH = "/api/tavily"
+
+
+def normalize_tavily_api_base_url(api_url: str) -> str:
+    """
+    Normalize Tavily-compatible base URLs before appending endpoint paths.
+
+    Args:
+        api_url: The configured Tavily-compatible API base URL.
+
+    Returns:
+        The normalized base URL for Tavily HTTP API endpoints.
+    """
+    trimmed_url = api_url.rstrip("/")
+    parsed = urlparse(trimmed_url)
+    normalized_path = parsed.path.rstrip("/")
+
+    if normalized_path.endswith(HIKARI_MCP_PATH):
+        prefix = normalized_path[: -len(HIKARI_MCP_PATH)]
+        hikari_path = f"{prefix}{HIKARI_TAVILY_API_PATH}"
+        return urlunparse(
+            parsed._replace(path=hikari_path, params="", query="", fragment="")
+        ).rstrip("/")
+
+    return trimmed_url
 
 
 def normalize_site_host(url: str) -> str | None:
@@ -149,6 +176,19 @@ class TavilyClient:
         """
         self._config = config
 
+    def _build_endpoint_url(self, path: str) -> str:
+        """
+        Build a Tavily-compatible endpoint URL from the configured base URL.
+
+        Args:
+            path: The endpoint path to append.
+
+        Returns:
+            The full endpoint URL.
+        """
+        base_url = normalize_tavily_api_base_url(self._config.tavily_api_url)
+        return f"{base_url}/{path.lstrip('/')}"
+
     @property
     def is_configured(self) -> bool:
         """
@@ -190,7 +230,7 @@ class TavilyClient:
         if not self.is_configured:
             return None
 
-        endpoint = f"{self._config.tavily_api_url.rstrip('/')}/extract"
+        endpoint = self._build_endpoint_url("extract")
         headers = self._get_headers()
         body = {"urls": [url], "format": "markdown"}
         retry_settings = get_retry_settings(self._config)
@@ -228,7 +268,7 @@ class TavilyClient:
         if not self.is_configured:
             return None
 
-        endpoint = f"{self._config.tavily_api_url.rstrip('/')}/search"
+        endpoint = self._build_endpoint_url("search")
         headers = self._get_headers()
         body = {
             "query": query,
@@ -311,7 +351,7 @@ class TavilyClient:
             response.raise_for_status()
             return response.json()
 
-        endpoint = f"{self._config.tavily_api_url.rstrip('/')}/map"
+        endpoint = self._build_endpoint_url("map")
         headers = self._get_headers()
         body = build_tavily_map_body(
             url=url,

@@ -63,7 +63,7 @@ The server runs over stdio.
 | `GROK_API_URL` | Yes | - | Must be OpenAI-compatible. |
 | `GROK_API_KEY` | Yes | - | Used for Grok requests. |
 | `GROK_MODEL` | No | `grok-4.20-beta` | Default model. |
-| `TAVILY_API_URL` | No | `https://api.tavily.com` | Used by `web_fetch` and `web_map`. |
+| `TAVILY_API_URL` | No | `https://api.tavily.com` | Used by `web_fetch` and `web_map`. Tavily Hikari `/mcp` URLs are normalized to the same host's `/api/tavily` HTTP facade. |
 | `TAVILY_API_KEY` | No | - | Required only for Tavily-backed tools. |
 
 ### Optional Variables
