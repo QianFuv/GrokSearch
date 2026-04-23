@@ -1,61 +1,6 @@
-"""Base search provider abstractions used by the Grok Search server."""
+"""Base provider abstractions used by the Grok Search server."""
 
 from abc import ABC, abstractmethod
-
-
-class SearchResult:
-    """
-    Represent a normalized search result returned by a provider.
-
-    Attributes:
-        title: The result title.
-        url: The canonical result URL.
-        snippet: The summary text for the result.
-        source: The source label or publisher.
-        published_date: The publication date string when available.
-    """
-
-    def __init__(
-        self,
-        title: str,
-        url: str,
-        snippet: str,
-        source: str = "",
-        published_date: str = "",
-    ) -> None:
-        """
-        Initialize a normalized search result object.
-
-        Args:
-            title: The result title.
-            url: The canonical result URL.
-            snippet: The summary text for the result.
-            source: The source label or publisher.
-            published_date: The publication date string when available.
-
-        Returns:
-            None.
-        """
-        self.title = title
-        self.url = url
-        self.snippet = snippet
-        self.source = source
-        self.published_date = published_date
-
-    def to_dict(self) -> dict[str, str]:
-        """
-        Convert the result into a JSON-serializable dictionary.
-
-        Returns:
-            A dictionary containing the normalized result fields.
-        """
-        return {
-            "title": self.title,
-            "url": self.url,
-            "snippet": self.snippet,
-            "source": self.source,
-            "published_date": self.published_date,
-        }
 
 
 class BaseSearchProvider(ABC):
@@ -103,7 +48,7 @@ class BaseSearchProvider(ABC):
         Returns:
             A provider-specific response payload.
         """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def get_provider_name(self) -> str:
@@ -113,4 +58,4 @@ class BaseSearchProvider(ABC):
         Returns:
             The provider name.
         """
-        pass
+        raise NotImplementedError

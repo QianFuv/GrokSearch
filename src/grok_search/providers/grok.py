@@ -16,15 +16,10 @@ from tenacity import (
 )
 from tenacity.wait import wait_base
 
-from ..config import config
 from ..logger import log_info
-from ..utils import (
-    fetch_prompt,
-    rank_sources_prompt,
-    sanitize_model_output,
-    search_prompt,
-    url_describe_prompt,
-)
+from ..prompts import RANK_SOURCES_PROMPT, SEARCH_PROMPT, URL_DESCRIBE_PROMPT
+from ..runtime import RetrySettings
+from ..utils import sanitize_model_output
 from .base import BaseSearchProvider
 
 
@@ -320,7 +315,14 @@ class GrokSearchProvider(BaseSearchProvider):
         model: The model identifier used for requests.
     """
 
-    def __init__(self, api_url: str, api_key: str, model: str = "grok-4-fast"):
+    def __init__(
+        self,
+        api_url: str,
+        api_key: str,
+        model: str = "grok-4-fast",
+        retry_settings: RetrySettings | None = None,
+        debug_enabled: bool = False,
+    ) -> None:
         """
         Initialize the Grok search provider.
 
@@ -328,12 +330,20 @@ class GrokSearchProvider(BaseSearchProvider):
             api_url: The upstream API base URL.
             api_key: The API key used for authentication.
             model: The model identifier used for requests.
+            retry_settings: Retry timing settings for upstream requests.
+            debug_enabled: Whether debug logging is enabled.
 
         Returns:
             None.
         """
         super().__init__(api_url, api_key)
         self.model = model
+        self.retry_settings = retry_settings or RetrySettings(
+            max_attempts=3,
+            multiplier=1.0,
+            max_wait=10,
+        )
+        self.debug_enabled = debug_enabled
 
     def get_provider_name(self) -> str:
         """
@@ -387,7 +397,7 @@ class GrokSearchProvider(BaseSearchProvider):
             "messages": [
                 {
                     "role": "system",
-                    "content": search_prompt,
+                    "content": SEARCH_PROMPT,
                 },
                 {"role": "user", "content": time_context + query + platform_prompt},
             ],
@@ -395,40 +405,9 @@ class GrokSearchProvider(BaseSearchProvider):
         }
 
         await log_info(
-            ctx, f"platform_prompt: {query + platform_prompt}", config.debug_enabled
+            ctx, f"platform_prompt: {query + platform_prompt}", self.debug_enabled
         )
 
-        return await self._execute_stream_with_retry(headers, payload, ctx)
-
-    async def fetch(self, url: str, ctx=None) -> str:
-        """
-        Fetch and convert a webpage into structured Markdown text.
-
-        Args:
-            url: The target page URL.
-            ctx: Optional FastMCP context used for logging.
-
-        Returns:
-            The raw model response text.
-        """
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": fetch_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": url + "\n获取该网页内容并返回其结构化Markdown格式",
-                },
-            ],
-            "stream": True,
-        }
         return await self._execute_stream_with_retry(headers, payload, ctx)
 
     async def _parse_streaming_response(
@@ -483,7 +462,7 @@ class GrokSearchProvider(BaseSearchProvider):
 
         content = sanitize_model_output(content)
 
-        await log_info(ctx, f"content: {content}", config.debug_enabled)
+        await log_info(ctx, f"content: {content}", self.debug_enabled)
 
         return content
 
@@ -505,9 +484,10 @@ class GrokSearchProvider(BaseSearchProvider):
 
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(config.retry_max_attempts + 1),
+                stop=stop_after_attempt(self.retry_settings.max_attempts + 1),
                 wait=_WaitWithRetryAfter(
-                    config.retry_multiplier, config.retry_max_wait
+                    self.retry_settings.multiplier,
+                    self.retry_settings.max_wait,
                 ),
                 retry=retry_if_exception(_is_retryable_exception),
                 reraise=True,
@@ -541,7 +521,7 @@ class GrokSearchProvider(BaseSearchProvider):
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": url_describe_prompt},
+                {"role": "system", "content": URL_DESCRIBE_PROMPT},
                 {"role": "user", "content": url},
             ],
             "stream": True,
@@ -577,7 +557,7 @@ class GrokSearchProvider(BaseSearchProvider):
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": rank_sources_prompt},
+                {"role": "system", "content": RANK_SOURCES_PROMPT},
                 {"role": "user", "content": f"Query: {query}\n\n{sources_text}"},
             ],
             "stream": True,
