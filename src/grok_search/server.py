@@ -21,7 +21,7 @@ try:
     from grok_search.logger import log_info
     from grok_search.planning import _split_csv
     from grok_search.planning import engine as planning_engine
-    from grok_search.providers.grok import GrokSearchProvider
+    from grok_search.providers.grok import GrokSearchProvider, _join_api_url
     from grok_search.sources import (
         SourcesCache,
         merge_sources,
@@ -33,7 +33,7 @@ except ImportError:
     from .logger import log_info
     from .planning import _split_csv
     from .planning import engine as planning_engine
-    from .providers.grok import GrokSearchProvider
+    from .providers.grok import GrokSearchProvider, _join_api_url
     from .sources import (
         SourcesCache,
         merge_sources,
@@ -213,23 +213,40 @@ async def _fetch_available_models(api_url: str, api_key: str) -> list[str]:
     """
     import httpx
 
-    models_url = f"{api_url.rstrip('/')}/models"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            models_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+    models_urls = list(
+        dict.fromkeys(
+            [
+                f"{api_url.rstrip('/')}/models",
+                _join_api_url(api_url, "/models"),
+            ]
         )
-        response.raise_for_status()
-        data = response.json()
+    )
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        last_error: Exception | None = None
+        for models_url in models_urls:
+            try:
+                response = await client.get(
+                    models_url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+            except Exception as exc:
+                last_error = exc
+                continue
 
-    models: list[str] = []
-    for item in (data or {}).get("data", []) or []:
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            models.append(item["id"])
-    return models
+            models: list[str] = []
+            for item in (data or {}).get("data", []) or []:
+                if isinstance(item, dict) and isinstance(item.get("id"), str):
+                    models.append(item["id"])
+            return models
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError("Unable to probe any /models endpoint")
 
 
 async def _get_available_models_cached(api_url: str, api_key: str) -> list[str]:

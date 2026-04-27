@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from tenacity import (
@@ -115,6 +116,280 @@ def _extract_text_from_payload(payload: dict[str, Any]) -> str:
         return "".join(fragment for fragment in fragments if fragment)
 
     return ""
+
+
+def _join_api_url(base_url: str, path: str, api_version: str = "v1") -> str:
+    """
+    Join an OpenAI-compatible API base URL with an endpoint path.
+
+    Args:
+        base_url: The configured API base URL.
+        path: The endpoint path to append.
+        api_version: The version segment to add when missing.
+
+    Returns:
+        The normalized endpoint URL.
+    """
+    normalized_base = base_url.rstrip("/")
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    version_fragment = f"/{api_version}"
+
+    if normalized_base.endswith(version_fragment):
+        return f"{normalized_base}{normalized_path}"
+
+    return f"{normalized_base}{version_fragment}{normalized_path}"
+
+
+def _extract_responses_text(payload: dict[str, Any]) -> str:
+    """
+    Extract final message text from a Responses API payload.
+
+    Args:
+        payload: A decoded JSON payload from the upstream API.
+
+    Returns:
+        The extracted text, or an empty string when unavailable.
+    """
+    if not isinstance(payload, dict):
+        return ""
+
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return ""
+
+    fragments: list[str] = []
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for block in _get_responses_message_content(item):
+            if not isinstance(block, dict) or block.get("type") != "output_text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str) and text:
+                fragments.append(text)
+
+    return "\n".join(fragments)
+
+
+def _normalize_source_title(title: str | None, url: str) -> str:
+    """
+    Normalize a source title into a readable label.
+
+    Args:
+        title: The raw source title.
+        url: The source URL.
+
+    Returns:
+        A normalized title suitable for markdown source listings.
+    """
+    clean_title = (title or "").strip()
+    if clean_title and not clean_title.isdigit():
+        return clean_title
+
+    return urlparse(url).hostname or url
+
+
+def _get_responses_message_content(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Extract message content blocks from a Responses output item.
+
+    Args:
+        item: A single Responses output item.
+
+    Returns:
+        The normalized list of message content blocks.
+    """
+    content = item.get("content")
+    if isinstance(content, list):
+        return [block for block in content if isinstance(block, dict)]
+
+    message = item.get("message")
+    if isinstance(message, dict):
+        nested_content = message.get("content")
+        if isinstance(nested_content, list):
+            return [block for block in nested_content if isinstance(block, dict)]
+
+    return []
+
+
+def _extract_responses_sources(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """
+    Extract and deduplicate sources from a Responses API payload.
+
+    Args:
+        payload: A decoded JSON payload from the upstream API.
+
+    Returns:
+        A first-seen ordered list of normalized sources.
+    """
+    if not isinstance(payload, dict):
+        return []
+
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return []
+
+    seen: set[str] = set()
+    sources: list[dict[str, str]] = []
+
+    def _add_source(url: str, title: str | None) -> None:
+        if not url or url in seen:
+            return
+        seen.add(url)
+        sources.append({"title": _normalize_source_title(title, url), "url": url})
+
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("type") == "web_search_call":
+            action = item.get("action")
+            if isinstance(action, dict):
+                raw_sources = action.get("sources")
+                if isinstance(raw_sources, list):
+                    for source in raw_sources:
+                        if isinstance(source, dict):
+                            url = source.get("url")
+                            if isinstance(url, str):
+                                _add_source(url, source.get("title"))
+            continue
+
+        if item.get("type") != "message":
+            continue
+
+        for block in _get_responses_message_content(item):
+            annotations = block.get("annotations")
+            if not isinstance(annotations, list):
+                continue
+            for annotation in annotations:
+                if not isinstance(annotation, dict):
+                    continue
+                if annotation.get("type") != "url_citation":
+                    continue
+                url = annotation.get("url")
+                if isinstance(url, str):
+                    _add_source(url, annotation.get("title"))
+
+    return sources
+
+
+def _format_sources_markdown(sources: list[dict[str, str]]) -> str:
+    """
+    Format normalized sources into the provider's trailing markdown block.
+
+    Args:
+        sources: The normalized source list.
+
+    Returns:
+        A markdown sources section, or an empty string.
+    """
+    if not sources:
+        return ""
+
+    lines = ["## Sources"]
+    for source in sources:
+        lines.append(f"- [{source['title']}]({source['url']})")
+    return "\n\n" + "\n".join(lines)
+
+
+def _is_responses_payload(payload: Any) -> bool:
+    """
+    Check whether a decoded payload looks like a Responses API body.
+
+    Args:
+        payload: The decoded JSON payload.
+
+    Returns:
+        True when the payload matches the expected Responses shape.
+    """
+    return isinstance(payload, dict) and isinstance(payload.get("output"), list)
+
+
+def _looks_like_responses_unsupported_error(response: httpx.Response) -> bool:
+    """
+    Check whether an HTTP error indicates the Responses API is unsupported.
+
+    Args:
+        response: The upstream HTTP response.
+
+    Returns:
+        True when the error suggests this backend does not support Responses.
+    """
+    if response.status_code in {404, 405}:
+        return True
+
+    if response.status_code not in {400, 422}:
+        return False
+
+    try:
+        body = json.dumps(response.json(), ensure_ascii=False).lower()
+    except ValueError:
+        body = response.text.lower()
+
+    unsupported_markers = (
+        "unsupported",
+        "not supported",
+        "unknown parameter",
+        "unsupported parameter",
+        "unexpected parameter",
+        "unknown field",
+        "invalid tool",
+        "unknown tool",
+        "extra inputs are not permitted",
+    )
+    responses_markers = (
+        "responses",
+        "/responses",
+        "tools",
+        "web_search",
+        "instructions",
+        "input",
+    )
+    return any(marker in body for marker in unsupported_markers) and any(
+        marker in body for marker in responses_markers
+    )
+
+
+def _looks_like_duplicate_web_search_tools_error(response: httpx.Response) -> bool:
+    """
+    Check whether the backend rejected an explicit web_search tool as duplicate.
+
+    Args:
+        response: The upstream HTTP response.
+
+    Returns:
+        True when the backend wants Responses search without explicit tools.
+    """
+    if response.status_code not in {400, 422}:
+        return False
+
+    try:
+        body = json.dumps(response.json(), ensure_ascii=False).lower()
+    except ValueError:
+        body = response.text.lower()
+
+    return "multiple web search tools" in body and "not supported" in body
+
+
+def _responses_payload_without_tools(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Copy a Responses payload while removing explicit tool declarations.
+
+    Args:
+        payload: The original Responses payload.
+
+    Returns:
+        A shallow payload copy without the tools field.
+    """
+    toolless_payload = dict(payload)
+    toolless_payload.pop("tools", None)
+    return toolless_payload
+
+
+class ResponsesUnsupportedError(RuntimeError):
+    """
+    Raised when an upstream backend clearly does not support Responses search.
+    """
 
 
 def get_local_time_info() -> str:
@@ -381,15 +656,22 @@ class GrokSearchProvider(BaseSearchProvider):
         time_context = (
             get_local_time_info() + "\n" if _needs_time_context(query) else ""
         )
+        full_query = time_context + query + platform_prompt
 
-        payload = {
+        responses_payload = {
+            "model": self.model,
+            "instructions": search_prompt,
+            "input": [{"role": "user", "content": full_query}],
+            "tools": [{"type": "web_search"}],
+        }
+        legacy_payload = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
                     "content": search_prompt,
                 },
-                {"role": "user", "content": time_context + query + platform_prompt},
+                {"role": "user", "content": full_query},
             ],
             "stream": True,
         }
@@ -398,7 +680,12 @@ class GrokSearchProvider(BaseSearchProvider):
             ctx, f"platform_prompt: {query + platform_prompt}", config.debug_enabled
         )
 
-        return await self._execute_stream_with_retry(headers, payload, ctx)
+        try:
+            return await self._execute_responses_search_with_retry(
+                headers, responses_payload, ctx
+            )
+        except ResponsesUnsupportedError:
+            return await self._execute_stream_with_retry(headers, legacy_payload, ctx)
 
     async def fetch(self, url: str, ctx=None) -> str:
         """
@@ -521,6 +808,94 @@ class GrokSearchProvider(BaseSearchProvider):
                     ) as response:
                         response.raise_for_status()
                         return await self._parse_streaming_response(response, ctx)
+        raise RuntimeError("Search request ended without a response")
+
+    async def _execute_responses_search_with_retry(
+        self, headers: dict[str, str], payload: dict[str, Any], ctx=None
+    ) -> str:
+        """
+        Execute a non-streaming Responses search request with retry handling.
+
+        Args:
+            headers: The HTTP headers for the request.
+            payload: The JSON payload sent to the upstream API.
+            ctx: Optional FastMCP context used for logging.
+
+        Returns:
+            The cleaned model response text with an optional sources block.
+        """
+        timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
+
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(config.retry_max_attempts + 1),
+                wait=_WaitWithRetryAfter(
+                    config.retry_multiplier, config.retry_max_wait
+                ),
+                retry=retry_if_exception(_is_retryable_exception),
+                reraise=True,
+            ):
+                with attempt:
+                    endpoint = _join_api_url(self.api_url, "/responses")
+                    effective_payload = payload
+                    response = await client.post(
+                        endpoint,
+                        headers=headers,
+                        json=effective_payload,
+                    )
+                    if (
+                        "tools" in effective_payload
+                        and _looks_like_duplicate_web_search_tools_error(response)
+                    ):
+                        await log_info(
+                            ctx,
+                            "Responses backend rejected explicit web_search "
+                            "tools; retrying without tools",
+                            config.debug_enabled,
+                        )
+                        effective_payload = _responses_payload_without_tools(
+                            effective_payload
+                        )
+                        response = await client.post(
+                            endpoint,
+                            headers=headers,
+                            json=effective_payload,
+                        )
+
+                    if _looks_like_responses_unsupported_error(response):
+                        raise ResponsesUnsupportedError(
+                            f"Responses API unsupported: HTTP {response.status_code}"
+                        )
+
+                    response.raise_for_status()
+
+                    try:
+                        data = response.json()
+                    except ValueError as exc:
+                        raise ResponsesUnsupportedError(
+                            "Responses API returned a non-JSON payload"
+                        ) from exc
+
+                    if not _is_responses_payload(data):
+                        raise ResponsesUnsupportedError(
+                            "Responses API returned a non-Responses payload"
+                        )
+
+                    answer = sanitize_model_output(_extract_responses_text(data))
+                    sources_block = _format_sources_markdown(
+                        _extract_responses_sources(data)
+                    )
+
+                    if answer and sources_block:
+                        result = f"{answer}{sources_block}"
+                    elif sources_block:
+                        result = sources_block.lstrip()
+                    else:
+                        result = answer
+
+                    await log_info(ctx, f"content: {result}", config.debug_enabled)
+                    return result
+
         raise RuntimeError("Search request ended without a response")
 
     async def describe_url(self, url: str, ctx=None) -> dict:
