@@ -297,12 +297,83 @@ def _is_responses_payload(payload: Any) -> bool:
     Check whether a decoded payload looks like a Responses API body.
 
     Args:
-        payload: The decoded JSON payload.
+        payload: The decoded payload.
 
     Returns:
         True when the payload matches the expected Responses shape.
     """
     return isinstance(payload, dict) and isinstance(payload.get("output"), list)
+
+
+def _extract_responses_payload_from_sse(body: str) -> dict[str, Any] | None:
+    """
+    Extract the final Responses payload from an SSE response body.
+
+    Some OpenAI-compatible Responses facades return ``text/event-stream`` even
+    for non-streaming requests. Prefer the final ``response.completed`` event,
+    and fall back to constructing a minimal Responses-shaped payload from text
+    deltas when the final event is absent.
+    """
+    completed_payload: dict[str, Any] | None = None
+    text_fragments: list[str] = []
+    done_text = ""
+    done_annotations: list[dict[str, Any]] = []
+
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload_text = line[5:].lstrip()
+        if not payload_text or payload_text == "[DONE]":
+            continue
+        try:
+            event_payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            continue
+
+        if _is_responses_payload(event_payload):
+            completed_payload = event_payload
+            continue
+
+        response_payload = event_payload.get("response")
+        if _is_responses_payload(response_payload):
+            completed_payload = response_payload
+            continue
+
+        event_type = event_payload.get("type")
+        if event_type == "response.output_text.delta":
+            delta = event_payload.get("delta")
+            if isinstance(delta, str):
+                text_fragments.append(delta)
+        elif event_type == "response.output_text.done":
+            text = event_payload.get("text")
+            if isinstance(text, str):
+                done_text = text
+            annotations = event_payload.get("annotations")
+            if isinstance(annotations, list):
+                done_annotations = [a for a in annotations if isinstance(a, dict)]
+
+    if completed_payload is not None:
+        return completed_payload
+
+    text = done_text or "".join(text_fragments)
+    if not text:
+        return None
+
+    return {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": done_annotations,
+                    }
+                ],
+            }
+        ]
+    }
 
 
 def _looks_like_responses_unsupported_error(response: httpx.Response) -> bool:
@@ -869,12 +940,21 @@ class GrokSearchProvider(BaseSearchProvider):
 
                     response.raise_for_status()
 
-                    try:
-                        data = response.json()
-                    except ValueError as exc:
-                        raise ResponsesUnsupportedError(
-                            "Responses API returned a non-JSON payload"
-                        ) from exc
+                    if "text/event-stream" in response.headers.get(
+                        "content-type", ""
+                    ).lower():
+                        data = _extract_responses_payload_from_sse(response.text)
+                        if data is None:
+                            raise ResponsesUnsupportedError(
+                                "Responses API returned an empty SSE payload"
+                            )
+                    else:
+                        try:
+                            data = response.json()
+                        except ValueError as exc:
+                            raise ResponsesUnsupportedError(
+                                "Responses API returned a non-JSON payload"
+                            ) from exc
 
                     if not _is_responses_payload(data):
                         raise ResponsesUnsupportedError(
