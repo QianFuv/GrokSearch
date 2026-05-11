@@ -298,6 +298,37 @@ async def test_describe_url_tool_exposes_provider(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rank_sources_canonicalizes_markdown_input_before_provider(monkeypatch):
+    monkeypatch.setenv("GROK_API_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("GROK_API_KEY", "test-key")
+    monkeypatch.setattr(server.config, "_cached_model", "grok-4-fast", raising=False)
+    captured: dict[str, object] = {}
+
+    async def fake_rank_sources(
+        self, query: str, sources_text: str, total: int, ctx=None
+    ) -> list[int]:
+        captured["sources_text"] = sources_text
+        captured["total"] = total
+        return [2, 1]
+
+    monkeypatch.setattr(server.GrokSearchProvider, "rank_sources", fake_rank_sources)
+
+    result = await server.rank_sources(
+        "test query",
+        "1. [Alpha]( https://example.com/a )\n"
+        "2. [Alpha duplicate](https://example.com/a)\n"
+        "3. [Beta](https://example.com/b)",
+        3,
+    )
+
+    assert captured == {
+        "sources_text": "1. [Alpha](https://example.com/a)\n2. [Beta](https://example.com/b)",
+        "total": 2,
+    }
+    assert result == {"query": "test query", "order": [2, 1], "total": 2}
+
+
+@pytest.mark.asyncio
 async def test_rank_sources_tool_exposes_provider(monkeypatch):
     """
     Verify that the rank_sources tool delegates to the provider.
@@ -333,5 +364,159 @@ async def test_rank_sources_tool_exposes_provider(monkeypatch):
     monkeypatch.setattr(server.GrokSearchProvider, "rank_sources", fake_rank_sources)
 
     result = await server.rank_sources("test query", "1. A\n2. B", 2)
-
     assert result == {"query": "test query", "order": [2, 1], "total": 2}
+
+
+def test_build_tavily_map_body_adds_same_site_scope_for_scheme_less_urls():
+    """
+    Verify that map requests scope bare domain inputs the way Tavily examples allow.
+
+    Args:
+        None.
+
+    Returns:
+        None.
+    """
+    body = server._build_tavily_map_body(
+        "docs.example.com",
+        instructions="only API reference pages",
+        max_depth=2,
+        max_breadth=5,
+        limit=10,
+        timeout=30,
+    )
+
+    assert body["url"] == "docs.example.com"
+    assert body["instructions"] == "only API reference pages"
+    assert body["max_depth"] == 2
+    assert body["select_domains"] == ["docs.example.com"]
+    assert body["allow_external"] is False
+
+
+@pytest.mark.asyncio
+async def test_call_tavily_map_uses_legacy_same_site_results_when_strict_scope_empty(
+    monkeypatch,
+):
+    """
+    Verify that an unscoped retry can recover same-site URLs from an empty strict map.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    monkeypatch.setenv("TAVILY_API_URL", "https://example.invalid")
+
+    post_calls: list[dict[str, object]] = []
+    responses = [
+        {"base_url": "https://docs.example.com", "results": [], "response_time": 0.1},
+        {
+            "base_url": "https://docs.example.com",
+            "results": [
+                "https://docs.example.com/guide",
+                "https://external.example.net/nope",
+                {"url": "https://www.docs.example.com/api", "title": "API"},
+            ],
+            "response_time": 0.2,
+        },
+    ]
+
+    class FakeAsyncClient:
+        """
+        Provide deterministic Tavily map responses for strict and legacy calls.
+
+        Returns:
+            None.
+        """
+
+        def __init__(self, *args, **kwargs):
+            """
+            Ignore httpx.AsyncClient constructor arguments.
+
+            Args:
+                *args: Positional constructor arguments.
+                **kwargs: Keyword constructor arguments.
+
+            Returns:
+                None.
+            """
+            pass
+
+        async def __aenter__(self):
+            """
+            Enter the async context manager.
+
+            Returns:
+                The fake client instance.
+            """
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            """
+            Exit the async context manager.
+
+            Args:
+                exc_type: Exception type, if any.
+                exc: Exception instance, if any.
+                tb: Traceback, if any.
+
+            Returns:
+                False to propagate exceptions.
+            """
+            return False
+
+        async def post(self, endpoint, headers=None, json=None):
+            """
+            Return the next configured map response and record the outgoing body.
+
+            Args:
+                endpoint: The requested endpoint URL.
+                headers: Outgoing request headers.
+                json: Outgoing request body.
+
+            Returns:
+                A fake Tavily response.
+            """
+            post_calls.append({"endpoint": endpoint, "headers": headers, "json": json})
+            return _FakeResponse(responses.pop(0))
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    result = json.loads(
+        await server._call_tavily_map(
+            "https://docs.example.com",
+            instructions="only docs pages",
+            max_depth=2,
+            max_breadth=5,
+            limit=10,
+            timeout=30,
+        )
+    )
+
+    assert result["results"] == [
+        "https://docs.example.com/guide",
+        {"url": "https://www.docs.example.com/api", "title": "API"},
+    ]
+    assert result["raw_count"] == 3
+    assert result["filtered_out_count"] == 1
+    assert result["fallback_used"] == "legacy_unscoped_request"
+    assert post_calls[0]["json"] == {
+        "url": "https://docs.example.com",
+        "instructions": "only docs pages",
+        "max_depth": 2,
+        "max_breadth": 5,
+        "limit": 10,
+        "timeout": 30,
+        "allow_external": False,
+        "select_domains": ["docs.example.com"],
+    }
+    assert post_calls[1]["json"] == {
+        "url": "https://docs.example.com",
+        "instructions": "only docs pages",
+        "max_depth": 2,
+        "max_breadth": 5,
+        "limit": 10,
+        "timeout": 30,
+    }

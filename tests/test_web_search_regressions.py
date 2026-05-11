@@ -200,6 +200,134 @@ async def test_parse_streaming_response_accepts_message_content_payload():
     assert result == "Structured answer"
 
 
+@pytest.mark.asyncio
+async def test_describe_url_parses_loose_markdown_sections(monkeypatch):
+    """
+    Verify that describe_url accepts markdown headings and bullet extracts.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    provider = GrokSearchProvider("https://example.invalid/v1", "test-key")
+
+    async def loose_markdown(headers, payload, ctx=None) -> str:
+        """
+        Return markdown that does not use exact Title/Extracts labels.
+
+        Args:
+            headers: Outgoing request headers.
+            payload: Outgoing request payload.
+            ctx: Optional request context.
+
+        Returns:
+            A loose markdown description response.
+        """
+        return (
+            "# Example Article\n\n"
+            "This page explains how robust URL description parsing should work.\n\n"
+            "## Key extracts\n"
+            '- "The first original fragment."\n'
+            '- "The second original fragment."\n'
+        )
+
+    monkeypatch.setattr(provider, "_execute_stream_with_retry", loose_markdown)
+
+    result = await provider.describe_url("https://example.com/article")
+
+    assert result == {
+        "title": "Example Article",
+        "summary": "This page explains how robust URL description parsing should work.",
+        "extracts": '"The first original fragment." | "The second original fragment."',
+        "url": "https://example.com/article",
+    }
+
+
+@pytest.mark.asyncio
+async def test_describe_url_parses_natural_language_output(monkeypatch):
+    """
+    Verify that describe_url extracts useful fields from prose-like model output.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    provider = GrokSearchProvider("https://example.invalid/v1", "test-key")
+
+    async def natural_language(headers, payload, ctx=None) -> str:
+        """
+        Return a natural-language description response.
+
+        Args:
+            headers: Outgoing request headers.
+            payload: Outgoing request payload.
+            ctx: Optional request context.
+
+        Returns:
+            A natural-language description response.
+        """
+        return (
+            'The page title is "Natural Language Page". '
+            "Summary: It describes parser fallbacks for model responses. "
+            'Extracts include "Alpha original quote" and "Beta original quote".'
+        )
+
+    monkeypatch.setattr(provider, "_execute_stream_with_retry", natural_language)
+
+    result = await provider.describe_url("https://example.com/natural")
+
+    assert result == {
+        "title": "Natural Language Page",
+        "summary": "It describes parser fallbacks for model responses.",
+        "extracts": '"Alpha original quote" | "Beta original quote"',
+        "url": "https://example.com/natural",
+    }
+
+
+@pytest.mark.asyncio
+async def test_describe_url_returns_diagnostic_when_provider_fails(monkeypatch):
+    """
+    Verify that describe_url returns a fallback diagnostic instead of empty output.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    provider = GrokSearchProvider("https://example.invalid/v1", "test-key")
+
+    async def failing_request(headers, payload, ctx=None) -> str:
+        """
+        Simulate a provider transport failure.
+
+        Args:
+            headers: Outgoing request headers.
+            payload: Outgoing request payload.
+            ctx: Optional request context.
+
+        Returns:
+            Never returns; raises RuntimeError.
+        """
+        raise RuntimeError("upstream timeout")
+
+    monkeypatch.setattr(provider, "_execute_stream_with_retry", failing_request)
+
+    result = await provider.describe_url("https://example.com/down")
+
+    assert result == {
+        "title": "https://example.com/down",
+        "summary": "Unable to describe URL: RuntimeError: upstream timeout",
+        "extracts": "",
+        "url": "https://example.com/down",
+        "error": "Describe URL failed: RuntimeError: upstream timeout",
+    }
+
+
 def test_join_api_url_avoids_duplicate_v1():
     """
     Verify that endpoint joining keeps the version segment only once.
@@ -518,6 +646,67 @@ async def test_fetch_available_models_falls_back_to_v1_models(monkeypatch):
         "https://example.invalid/models",
         "https://example.invalid/v1/models",
     ]
+
+
+@pytest.mark.asyncio
+async def test_web_search_caches_canonical_sources_with_provenance(monkeypatch):
+    monkeypatch.setenv("GROK_API_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("GROK_API_KEY", "test-key")
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+
+    async def answer_with_sources(
+        self, query, platform="", min_results=3, max_results=10, ctx=None
+    ):
+        return (
+            "Canonical answer.\n\n"
+            "## Sources\n"
+            "- [Primary]( https://example.com/a )\n"
+            "- [Duplicate primary](https://example.com/a)"
+        )
+
+    async def tavily_results(query, max_results=6):
+        return [
+            {
+                "title": "Duplicate extra",
+                "url": "https://example.com/a",
+                "content": "Should be deduped behind primary.",
+            },
+            {
+                "title": "Extra",
+                "url": "https://example.com/b",
+                "content": "Supplemental result.",
+            },
+        ]
+
+    monkeypatch.setattr(server.GrokSearchProvider, "search", answer_with_sources)
+    monkeypatch.setattr(server, "_call_tavily_search", tavily_results)
+
+    result = await server.web_search("canonical source contract", extra_sources=2)
+    cached = await server.get_sources(result["session_id"])
+
+    assert result["content"] == "Canonical answer."
+    assert result["sources_count"] == 2
+    assert cached["sources"] == [
+        {"title": "Primary", "url": "https://example.com/a", "provider": "grok"},
+        {
+            "title": "Extra",
+            "url": "https://example.com/b",
+            "description": "Supplemental result.",
+            "provider": "tavily",
+        },
+    ]
+    assert cached["primary_sources"] == [
+        {"title": "Primary", "url": "https://example.com/a", "provider": "grok"}
+    ]
+    assert cached["extra_sources"] == [
+        {
+            "title": "Extra",
+            "url": "https://example.com/b",
+            "description": "Supplemental result.",
+            "provider": "tavily",
+        }
+    ]
+    assert "not automatically verified" in cached["source_warning"]
 
 
 @pytest.mark.asyncio
