@@ -24,6 +24,7 @@ try:
     from grok_search.providers.grok import GrokSearchProvider, _join_api_url
     from grok_search.sources import (
         SourcesCache,
+        format_rank_sources_input,
         merge_sources,
         new_session_id,
         split_answer_and_sources,
@@ -36,6 +37,7 @@ except ImportError:
     from .providers.grok import GrokSearchProvider, _join_api_url
     from .sources import (
         SourcesCache,
+        format_rank_sources_input,
         merge_sources,
         new_session_id,
         split_answer_and_sources,
@@ -46,6 +48,53 @@ mcp = FastMCP("grok-search")
 _SOURCES_CACHE = SourcesCache(max_size=256)
 _AVAILABLE_MODELS_CACHE: dict[tuple[str, str], list[str]] = {}
 _AVAILABLE_MODELS_LOCK = asyncio.Lock()
+SOURCE_PROVENANCE_WARNING = (
+    "Extra sources come from Tavily supplemental search results and are not "
+    "automatically verified as evidence for the answer."
+)
+
+
+def _sources_with_provider(sources: list[dict], provider: str) -> list[dict]:
+    """
+    Normalize source records and tag them with their provenance provider.
+
+    Args:
+        sources: Raw source dictionaries.
+        provider: Provider/provenance label to attach.
+
+    Returns:
+        Normalized source dictionaries with provider labels.
+    """
+    return merge_sources([{**source, "provider": provider} for source in sources or []])
+
+
+def _source_bundle(primary_sources: list[dict], extra_sources: list[dict]) -> dict:
+    """
+    Build the canonical source cache payload with provenance fields.
+
+    Args:
+        primary_sources: Sources extracted from the main answer/provider.
+        extra_sources: Supplemental sources from optional external search.
+
+    Returns:
+        A structured cache payload with primary, extra, merged, and warning fields.
+    """
+    primary = merge_sources(primary_sources)
+    primary_urls = {source["url"] for source in primary}
+    extra = [
+        source
+        for source in merge_sources(extra_sources)
+        if source["url"] not in primary_urls
+    ]
+    merged = merge_sources(primary, extra)
+    bundle: dict[str, object] = {
+        "primary_sources": primary,
+        "extra_sources": extra,
+        "sources": merged,
+    }
+    if extra:
+        bundle["source_warning"] = SOURCE_PROVENANCE_WARNING
+    return bundle
 
 
 def _normalize_site_host(url: str) -> str | None:
@@ -58,7 +107,14 @@ def _normalize_site_host(url: str) -> str | None:
     Returns:
         The normalized hostname, or None when it cannot be determined.
     """
-    parsed = urlparse(url)
+    cleaned = url.strip()
+    parsed = urlparse(cleaned)
+    if (
+        not parsed.hostname
+        and "://" not in cleaned
+        and not cleaned.startswith(("/", "#"))
+    ):
+        parsed = urlparse(f"//{cleaned}")
     if not parsed.hostname:
         return None
     return parsed.hostname.lower().rstrip(".")
@@ -549,8 +605,12 @@ async def web_search(
         tavily_results = tavily_value if isinstance(tavily_value, list) else None
 
     answer, grok_sources = split_answer_and_sources(grok_result)
-    extra = _extra_results_to_sources(tavily_results)
-    all_sources = merge_sources(grok_sources, extra)
+    primary_sources = _sources_with_provider(grok_sources, "grok")
+    extra_source_records = _sources_with_provider(
+        _extra_results_to_sources(tavily_results), "tavily"
+    )
+    source_bundle = _source_bundle(primary_sources, extra_source_records)
+    all_sources = source_bundle["sources"]
 
     if not answer:
         if grok_error is not None:
@@ -565,7 +625,7 @@ async def web_search(
                 "Search completed, but the upstream response was empty after retries."
             )
 
-    await _SOURCES_CACHE.set(session_id, all_sources)
+    await _SOURCES_CACHE.set(session_id, source_bundle)
     return {
         "session_id": session_id,
         "content": answer,
@@ -603,6 +663,10 @@ async def get_sources(
             "sources_count": 0,
             "error": "session_id_not_found_or_expired",
         }
+    if isinstance(sources, dict) and isinstance(sources.get("sources"), list):
+        response = {"session_id": session_id, **sources}
+        response["sources_count"] = len(sources["sources"])
+        return response
     return {"session_id": session_id, "sources": sources, "sources_count": len(sources)}
 
 
@@ -866,13 +930,23 @@ async def _call_tavily_map(
                     if isinstance(legacy_results, list)
                     else []
                 )
-                if (
-                    isinstance(legacy_results, list)
-                    and legacy_results
-                    and not legacy_filtered
-                ):
+                if isinstance(legacy_results, list) and legacy_filtered:
+                    response_payload["base_url"] = legacy_data.get(
+                        "base_url", response_payload["base_url"]
+                    )
+                    response_payload["results"] = legacy_filtered
+                    response_payload["response_time"] = legacy_data.get(
+                        "response_time", response_payload["response_time"]
+                    )
+                    response_payload["raw_count"] = len(legacy_results)
+                    response_payload["filtered_out_count"] = len(legacy_results) - len(
+                        legacy_filtered
+                    )
+                    response_payload["fallback_used"] = "legacy_unscoped_request"
+                elif isinstance(legacy_results, list) and legacy_results:
                     response_payload["raw_count"] = len(legacy_results)
                     response_payload["filtered_out_count"] = len(legacy_results)
+                    response_payload["fallback_used"] = "legacy_unscoped_request"
             return json.dumps(
                 response_payload,
                 ensure_ascii=False,
@@ -1207,15 +1281,20 @@ async def rank_sources(
         return {"query": query, "order": [], "error": str(e)}
 
     provider = GrokSearchProvider(api_url, api_key, effective_model)
+    canonical_sources_text, canonical_total = format_rank_sources_input(
+        sources_text, total
+    )
     try:
-        order = await provider.rank_sources(query, sources_text, total, ctx)
+        order = await provider.rank_sources(
+            query, canonical_sources_text, canonical_total, ctx
+        )
     except Exception as e:
         return {
             "query": query,
             "order": [],
             "error": f"Rank sources failed: {type(e).__name__}: {e}",
         }
-    return {"query": query, "order": order, "total": total}
+    return {"query": query, "order": order, "total": canonical_total}
 
 
 @mcp.tool(

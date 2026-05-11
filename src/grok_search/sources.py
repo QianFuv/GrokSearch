@@ -12,7 +12,7 @@ from typing import Any
 
 from .utils import extract_unique_urls
 
-_MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\(\s*(https?://[^)\s]+)\s*\)")
 _SOURCE_LABEL_PATTERN = (
     r"(sources?|references?|citations?|resources?|links?|further reading|read more|"
     r"信源|参考资料|参考|引用|来源列表|来源)"
@@ -69,9 +69,9 @@ class SourcesCache:
         """
         self._max_size = max_size
         self._lock = asyncio.Lock()
-        self._cache: OrderedDict[str, list[dict]] = OrderedDict()
+        self._cache: OrderedDict[str, Any] = OrderedDict()
 
-    async def set(self, session_id: str, sources: list[dict]) -> None:
+    async def set(self, session_id: str, sources: Any) -> None:
         """
         Store sources for a session and evict the oldest entries when needed.
 
@@ -88,7 +88,7 @@ class SourcesCache:
             while len(self._cache) > self._max_size:
                 self._cache.popitem(last=False)
 
-    async def get(self, session_id: str) -> list[dict] | None:
+    async def get(self, session_id: str) -> Any | None:
         """
         Retrieve cached sources for a session.
 
@@ -108,27 +108,40 @@ class SourcesCache:
 
 def merge_sources(*source_lists: list[dict]) -> list[dict]:
     """
-    Merge multiple source lists while deduplicating by URL.
+    Merge multiple source lists while normalizing and deduplicating by URL.
 
     Args:
         *source_lists: Source lists to merge.
 
     Returns:
-        A merged list containing unique URLs in first-seen order.
+        A merged list containing unique normalized URLs in first-seen order.
     """
-    seen: set[str] = set()
-    merged: list[dict] = []
-    for sources in source_lists:
-        for item in sources or []:
-            url = (item or {}).get("url")
-            if not isinstance(url, str) or not url.strip():
-                continue
-            url = url.strip()
-            if url in seen:
-                continue
-            seen.add(url)
-            merged.append(item)
-    return merged
+    return _normalize_sources(
+        [item for sources in source_lists for item in (sources or [])]
+    )
+
+
+def format_rank_sources_input(sources_text: str, total: int) -> tuple[str, int]:
+    """
+    Normalize free-form numbered source text before sending it for ranking.
+
+    Args:
+        sources_text: Source list text supplied to the rank_sources tool.
+        total: The caller supplied source count.
+
+    Returns:
+        A tuple of canonical numbered Markdown and the normalized source count.
+    """
+    sources = merge_sources(_extract_sources_from_text(sources_text))
+    if not sources:
+        return sources_text, total
+
+    lines = []
+    for index, source in enumerate(sources, start=1):
+        url = source["url"]
+        title = source.get("title") or url
+        lines.append(f"{index}. [{title}]({url})")
+    return "\n".join(lines), len(sources)
 
 
 def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
@@ -453,46 +466,51 @@ def _normalize_sources(data: Any) -> list[dict]:
     normalized: list[dict] = []
     seen: set[str] = set()
 
+    def add_source(
+        url_value: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        provider: str | None = None,
+    ) -> None:
+        url = (url_value or "").strip()
+        if not url.startswith(("http://", "https://")) or url in seen:
+            return
+        seen.add(url)
+        source_item: dict = {"url": url}
+        if isinstance(title, str) and title.strip():
+            source_item["title"] = title.strip()
+        if isinstance(description, str) and description.strip():
+            source_item["description"] = description.strip()
+        if isinstance(provider, str) and provider.strip():
+            source_item["provider"] = provider.strip()
+        normalized.append(source_item)
+
     for item in items:
         if isinstance(item, str):
             for url in extract_unique_urls(item):
-                if url not in seen:
-                    seen.add(url)
-                    normalized.append({"url": url})
+                add_source(url)
             continue
 
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             title, url = item[0], item[1]
-            if (
-                isinstance(url, str)
-                and url.startswith(("http://", "https://"))
-                and url not in seen
-            ):
-                seen.add(url)
-                out: dict = {"url": url}
-                if isinstance(title, str) and title.strip():
-                    out["title"] = title.strip()
-                normalized.append(out)
+            if isinstance(url, str):
+                add_source(url, title=title if isinstance(title, str) else None)
             continue
 
         if isinstance(item, dict):
             url_value = item.get("url") or item.get("href") or item.get("link")
-            if not isinstance(url_value, str) or not url_value.startswith(
-                ("http://", "https://")
-            ):
+            if not isinstance(url_value, str):
                 continue
-            url = url_value
-            if url in seen:
-                continue
-            seen.add(url)
-            source_item: dict = {"url": url}
             title = item.get("title") or item.get("name") or item.get("label")
-            if isinstance(title, str) and title.strip():
-                source_item["title"] = title.strip()
             desc = item.get("description") or item.get("snippet") or item.get("content")
-            if isinstance(desc, str) and desc.strip():
-                source_item["description"] = desc.strip()
-            normalized.append(source_item)
+            provider = item.get("provider")
+            add_source(
+                url_value,
+                title=title if isinstance(title, str) else None,
+                description=desc if isinstance(desc, str) else None,
+                provider=provider if isinstance(provider, str) else None,
+            )
             continue
 
     return normalized

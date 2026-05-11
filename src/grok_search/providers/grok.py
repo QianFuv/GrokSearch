@@ -3,6 +3,7 @@ Grok provider implementations for search and page-level tools.
 """
 
 import json
+import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -116,6 +117,222 @@ def _extract_text_from_payload(payload: dict[str, Any]) -> str:
         return "".join(fragment for fragment in fragments if fragment)
 
     return ""
+
+
+def _strip_markdown_label(value: str) -> str:
+    """
+    Remove common Markdown list/heading/label decoration from a line.
+
+    Args:
+        value: The text to clean.
+
+    Returns:
+        Cleaned text suitable for a title, summary, or extract.
+    """
+    cleaned = value.strip()
+    cleaned = re.sub(r"^[-*+]\s+", "", cleaned)
+    cleaned = re.sub(r"^#{1,6}\s+", "", cleaned)
+    cleaned = cleaned.strip(" *_`\t")
+    return cleaned.strip()
+
+
+def _split_label_value(line: str) -> tuple[str, str] | None:
+    """
+    Split loose Markdown label lines such as '**Title:** Foo'.
+
+    Args:
+        line: A single model-output line.
+
+    Returns:
+        A lower-cased label and cleaned value, or None if no label exists.
+    """
+    match = re.match(
+        r"^\s*(?:[-*+]\s*)?(?:\*\*)?([A-Za-z][A-Za-z ]{1,30})(?:\*\*)?\s*:\s*(.+?)\s*$",
+        line,
+    )
+    if not match:
+        return None
+    return match.group(1).strip().lower(), _strip_markdown_label(match.group(2))
+
+
+def _quoted_fragments(text: str) -> list[str]:
+    """
+    Extract double-quoted fragments and normalize quote marks.
+
+    Args:
+        text: Text that may contain quoted excerpts.
+
+    Returns:
+        A list of fragments wrapped in ASCII double quotes.
+    """
+    fragments = re.findall(r'["“]([^"”]+)["”]', text)
+    return [f'"{fragment.strip()}"' for fragment in fragments]
+
+
+def _append_extracts(extracts: list[str], text: str) -> None:
+    """
+    Append extract fragments from text while preferring quoted verbatim snippets.
+
+    Args:
+        extracts: The extract accumulator to mutate.
+        text: A candidate extract line or paragraph.
+
+    Returns:
+        None.
+    """
+    cleaned = _strip_markdown_label(text)
+    if not cleaned:
+        return
+    quoted = _quoted_fragments(cleaned)
+    if quoted:
+        extracts.extend(quoted)
+    else:
+        extracts.append(cleaned)
+
+
+def _natural_language_description_parts(text: str) -> dict[str, str]:
+    """
+    Pull title, summary, and extracts from prose-like model output.
+
+    Args:
+        text: The full model output.
+
+    Returns:
+        A partial dictionary with any parsed fields.
+    """
+    fields: dict[str, str] = {}
+    title_match = re.search(
+        r"\b(?:page\s+)?title\s+(?:is|=|:)\s*[\"“]([^\"”]+)[\"”]",
+        text,
+        re.IGNORECASE,
+    )
+    if title_match:
+        fields["title"] = title_match.group(1).strip()
+
+    summary_match = re.search(
+        r"\b(?:summary|description)\s*:\s*(.*?)(?=\s+"
+        r"(?:extracts?|quotes?)\s*(?:include|:)|$)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if summary_match:
+        fields["summary"] = summary_match.group(1).strip().rstrip(" .") + "."
+
+    extracts_match = re.search(
+        r"\b(?:extracts?|quotes?)\s*(?:include|:)\s*(.+)$",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if extracts_match:
+        fragments = _quoted_fragments(extracts_match.group(1))
+        if fragments:
+            fields["extracts"] = " | ".join(fragments)
+
+    return fields
+
+
+def _parse_url_description_result(raw_result: str, url: str) -> dict[str, str]:
+    """
+    Parse exact, loose Markdown, or prose URL-description model output.
+
+    Args:
+        raw_result: The model output returned by the provider.
+        url: The URL being described.
+
+    Returns:
+        A dictionary with title, summary, extracts, and url fields.
+    """
+    result = sanitize_model_output(raw_result).strip()
+    natural_fields = _natural_language_description_parts(result)
+    title = natural_fields.get("title", "")
+    summary = natural_fields.get("summary", "")
+    extracts: list[str] = []
+    if natural_fields.get("extracts"):
+        extracts.extend(natural_fields["extracts"].split(" | "))
+
+    mode = ""
+    summary_lines: list[str] = []
+    for raw_line in result.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        label_value = _split_label_value(line)
+        if label_value:
+            label, value = label_value
+            if label in {"title", "page title"}:
+                title = value or title
+                mode = ""
+                continue
+            if label in {"summary", "description"}:
+                summary = value or summary
+                mode = ""
+                continue
+            if label in {"extract", "extracts", "quotes", "key extracts"}:
+                _append_extracts(extracts, value)
+                mode = "extracts"
+                continue
+
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+        if heading:
+            heading_text = _strip_markdown_label(heading.group(1))
+            if "extract" in heading_text.lower() or "quote" in heading_text.lower():
+                mode = "extracts"
+            elif not title:
+                title = heading_text
+                mode = ""
+            else:
+                mode = ""
+            continue
+
+        if mode == "extracts" or re.match(r"^[-*+]\s+", line):
+            _append_extracts(extracts, line)
+            continue
+
+        if not summary and not summary_lines:
+            summary_lines.append(_strip_markdown_label(line))
+
+    if not title:
+        title = url
+    if not summary and summary_lines:
+        summary = " ".join(line for line in summary_lines if line).strip()
+
+    deduped_extracts: list[str] = []
+    seen_extracts: set[str] = set()
+    for extract in extracts:
+        if extract and extract not in seen_extracts:
+            seen_extracts.add(extract)
+            deduped_extracts.append(extract)
+
+    response = {
+        "title": title,
+        "summary": summary,
+        "extracts": " | ".join(deduped_extracts),
+        "url": url,
+    }
+    if not summary and not deduped_extracts:
+        response["summary"] = result
+    return response
+
+
+def _describe_url_failure(url: str, message: str) -> dict[str, str]:
+    """
+    Build a stable fallback response for describe_url failures.
+
+    Args:
+        url: The URL being described.
+        message: The failure detail.
+
+    Returns:
+        A diagnostic describe_url response.
+    """
+    return {
+        "title": url,
+        "summary": f"Unable to describe URL: {message}",
+        "extracts": "",
+        "url": url,
+        "error": f"Describe URL failed: {message}",
+    }
 
 
 def _join_api_url(base_url: str, path: str, api_version: str = "v1") -> str:
@@ -1001,14 +1218,16 @@ class GrokSearchProvider(BaseSearchProvider):
             ],
             "stream": True,
         }
-        result = await self._execute_stream_with_retry(headers, payload, ctx)
-        title, extracts = url, ""
-        for line in result.strip().splitlines():
-            if line.startswith("Title:"):
-                title = line[6:].strip() or url
-            elif line.startswith("Extracts:"):
-                extracts = line[9:].strip()
-        return {"title": title, "extracts": extracts, "url": url}
+        try:
+            result = await self._execute_stream_with_retry(headers, payload, ctx)
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            return _describe_url_failure(url, message)
+
+        if not result or not result.strip():
+            return _describe_url_failure(url, "empty provider response")
+
+        return _parse_url_description_result(result, url)
 
     async def rank_sources(
         self, query: str, sources_text: str, total: int, ctx=None
