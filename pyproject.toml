@@ -19,6 +19,14 @@ dev = [
     "ruff>=0.14.6",
 ]
 
+[dependency-groups]
+dev = [
+    "mypy>=1.18.2",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.14.6",
+]
+
 [project.scripts]
 grok-search = "grok_search.server:main"
 
